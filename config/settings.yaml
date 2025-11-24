@@ -1,0 +1,163 @@
+# AI Trading Bot Configuration
+# Self-Learning Trading System
+
+# General Settings
+general:
+  name: "AI-TradingBot"
+  version: "1.0.0"
+  mode: "paper"  # paper, live
+  log_level: "INFO"
+  timezone: "UTC"
+
+# Trading Settings
+trading:
+  symbols:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "EUR/USD"
+  timeframes:
+    - "1m"
+    - "5m"
+    - "15m"
+    - "1h"
+    - "4h"
+    - "1d"
+  default_timeframe: "1h"
+  max_open_positions: 5
+  use_leverage: false
+  max_leverage: 3
+
+# Risk Management
+risk:
+  max_risk_per_trade: 0.02  # 2% of portfolio
+  max_daily_drawdown: 0.05  # 5%
+  max_total_drawdown: 0.15  # 15%
+  risk_reward_ratio: 2.0
+  trailing_stop: true
+  trailing_stop_pct: 0.01  # 1%
+  use_dynamic_position_sizing: true
+
+# Neural Network Settings
+neural_networks:
+  lstm:
+    sequence_length: 60
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.2
+    learning_rate: 0.001
+    batch_size: 32
+    epochs: 100
+  gru:
+    sequence_length: 60
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    learning_rate: 0.001
+  cnn:
+    image_size: [64, 64]
+    channels: 1
+    kernel_size: 3
+    num_filters: [32, 64, 128]
+    dropout: 0.3
+
+# Reinforcement Learning Settings
+reinforcement_learning:
+  ppo:
+    learning_rate: 0.0003
+    n_steps: 2048
+    batch_size: 64
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.01
+    total_timesteps: 1000000
+  dql:
+    learning_rate: 0.0001
+    buffer_size: 100000
+    batch_size: 64
+    gamma: 0.99
+    epsilon_start: 1.0
+    epsilon_end: 0.01
+    epsilon_decay: 0.995
+    target_update_freq: 1000
+
+# NLP Settings
+nlp:
+  model_name: "ProsusAI/finbert"
+  max_length: 512
+  sentiment_threshold: 0.3
+  news_sources:
+    - "https://feeds.finance.yahoo.com/rss/2.0/headline"
+    - "https://www.investing.com/rss/news.rss"
+  update_interval: 300  # seconds
+  languages: ["en"]
+
+# Genetic Algorithm Settings
+genetic_algorithm:
+  population_size: 100
+  generations: 50
+  mutation_rate: 0.1
+  crossover_rate: 0.8
+  tournament_size: 5
+  elite_size: 10
+  parameter_ranges:
+    take_profit: [0.01, 0.10]
+    stop_loss: [0.01, 0.05]
+    rsi_period: [7, 21]
+    ma_fast: [5, 20]
+    ma_slow: [20, 100]
+
+# Explainable AI Settings
+xai:
+  method: "shap"  # shap, lime, attention
+  num_samples: 100
+  feature_importance_threshold: 0.05
+  generate_reports: true
+  report_interval: 86400  # daily
+
+# Self-Learning Settings
+self_learning:
+  enabled: true
+  learning_interval: 3600  # seconds
+  min_trades_for_update: 10
+  performance_window: 100  # trades
+  strategy_update_threshold: 0.1  # 10% performance change
+  save_checkpoints: true
+  checkpoint_interval: 86400  # daily
+
+# Data Settings
+data:
+  lookback_days: 365
+  train_split: 0.7
+  validation_split: 0.15
+  test_split: 0.15
+  feature_scaling: "minmax"  # minmax, standard, robust
+  cache_data: true
+  cache_expiry: 3600  # seconds
+
+# API Settings
+api:
+  host: "0.0.0.0"
+  port: 8000
+  enable_websocket: true
+  cors_origins: ["*"]
+
+# Exchange Settings
+exchange:
+  name: "binance"
+  testnet: true
+  rate_limit: true
+  timeout: 30000
+
+# Database Settings
+database:
+  type: "sqlite"  # sqlite, postgresql, mongodb
+  path: "data_cache/trading.db"
+
+# Logging Settings
+logging:
+  file: "logs/trading_bot.log"
+  max_size: "100MB"
+  backup_count: 5
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {module}:{function}:{line} | {message}"

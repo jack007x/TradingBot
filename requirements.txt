@@ -1,0 +1,85 @@
+# AI Trading Bot - Self-Learning System
+# Core Dependencies
+
+# Deep Learning Frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+tensorflow>=2.13.0
+keras>=2.13.0
+
+# Reinforcement Learning
+stable-baselines3>=2.1.0
+gymnasium>=0.29.0
+shimmy>=1.3.0
+
+# Data Processing & Analysis
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+
+# Technical Analysis
+ta-lib>=0.4.28
+pandas-ta>=0.3.14b
+mplfinance>=0.12.10b0
+
+# NLP & Sentiment Analysis
+transformers>=4.35.0
+nltk>=3.8.1
+textblob>=0.17.1
+vaderSentiment>=3.3.2
+spacy>=3.7.0
+newspaper3k>=0.2.8
+
+# Genetic Algorithms
+deap>=1.4.1
+pygad>=3.2.0
+
+# Explainable AI
+shap>=0.43.0
+lime>=0.2.0.1
+captum>=0.6.0
+
+# Market Data APIs
+ccxt>=4.1.0
+yfinance>=0.2.31
+alpha-vantage>=2.3.1
+finnhub-python>=2.4.18
+
+# Web Scraping for News
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+aiohttp>=3.9.0
+feedparser>=6.0.10
+
+# Database
+sqlalchemy>=2.0.0
+redis>=5.0.0
+pymongo>=4.6.0
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.18.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+loguru>=0.7.2
+tqdm>=4.66.0
+joblib>=1.3.0
+
+# API & Web
+fastapi>=0.104.0
+uvicorn>=0.24.0
+websockets>=12.0
+python-socketio>=5.10.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Type Checking
+mypy>=1.7.0
+types-requests>=2.31.0
