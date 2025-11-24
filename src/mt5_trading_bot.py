@@ -254,7 +254,8 @@ class MT5TradingBot:
         # Train DQL Agent
         logger.info("Training DQL agent...")
         df_clean = df.select_dtypes(include=[np.number]).dropna()
-        state_size = len(df_clean.columns) * self.config.neural_network.lstm_sequence_length
+        # State size includes market features + 3 account features (position, balance, unrealized_pnl)
+        state_size = (len(df_clean.columns) + 3) * self.config.neural_network.lstm_sequence_length
 
         self.dql_agent = DQLTradingAgent(
             state_size=state_size,

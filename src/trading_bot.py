@@ -236,7 +236,8 @@ class AITradingBot:
         df = self.data_manager.get_historical_data(symbol, add_features=True)
         df_clean = df.select_dtypes(include=[np.number]).dropna()
 
-        state_size = df_clean.shape[1] * self.config.neural_network.lstm_sequence_length
+        # State size includes market features + 3 account features (position, balance, unrealized_pnl)
+        state_size = (df_clean.shape[1] + 3) * self.config.neural_network.lstm_sequence_length
 
         self.dql_agent = DQLTradingAgent(
             state_size=state_size,
