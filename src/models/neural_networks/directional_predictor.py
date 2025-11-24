@@ -145,10 +145,10 @@ class DirectionalPredictor:
         model_type: str = 'lstm',
         hidden_size: int = 128,
         num_layers: int = 2,
-        dropout: float = 0.3,
+        dropout: float = 0.2,
         num_classes: int = 3,
-        learning_rate: float = 1e-3,
-        weight_decay: float = 1e-4,
+        learning_rate: float = 5e-4,
+        weight_decay: float = 1e-5,
         device: Optional[str] = None
     ):
         """
@@ -161,7 +161,7 @@ class DirectionalPredictor:
             num_layers: Number of RNN layers
             dropout: Dropout rate
             num_classes: Number of classes (3: up/down/neutral)
-            learning_rate: Learning rate
+            learning_rate: Learning rate (reduced to 5e-4 for stability)
             weight_decay: Weight decay for regularization
             device: Device to use
         """
@@ -194,23 +194,26 @@ class DirectionalPredictor:
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
-        # Loss function with class weights for imbalanced data
-        self.criterion = nn.CrossEntropyLoss()
+        # Loss function - will be set with class weights in train()
+        self.criterion = None
 
-        # Optimizer
+        # Optimizer with lower learning rate
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=learning_rate,
-            weight_decay=weight_decay
+            weight_decay=weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-8
         )
 
-        # Learning rate scheduler
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        # Learning rate scheduler with warmup
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            mode='max',  # Maximize accuracy
-            factor=0.5,
-            patience=5,
-            min_lr=1e-6
+            max_lr=learning_rate * 2,
+            epochs=100,
+            steps_per_epoch=100,  # Will be updated in train()
+            pct_start=0.1,  # 10% warmup
+            anneal_strategy='cos'
         )
 
         # Training history
@@ -225,6 +228,7 @@ class DirectionalPredictor:
 
         logger.info(f"DirectionalPredictor ({model_type.upper()}) initialized on {self.device}")
         logger.info(f"Input size: {input_size}, Hidden: {hidden_size}, Layers: {num_layers}")
+        logger.info(f"Learning rate: {learning_rate}, Dropout: {dropout}")
 
     def train(
         self,
@@ -233,9 +237,9 @@ class DirectionalPredictor:
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None,
         epochs: int = 100,
-        batch_size: int = 32,
-        early_stopping_patience: int = 15,
-        min_delta: float = 0.001
+        batch_size: int = 64,
+        early_stopping_patience: int = 20,
+        min_delta: float = 0.005
     ) -> Dict[str, List[float]]:
         """
         Train the model.
@@ -246,13 +250,26 @@ class DirectionalPredictor:
             X_val: Validation sequences
             y_val: Validation labels
             epochs: Number of epochs
-            batch_size: Batch size
+            batch_size: Batch size (increased to 64)
             early_stopping_patience: Patience for early stopping
             min_delta: Minimum improvement for early stopping
 
         Returns:
             Training history
         """
+        # Calculate class weights for imbalanced data
+        unique, counts = np.unique(y_train, return_counts=True)
+        total_samples = len(y_train)
+        class_weights = torch.FloatTensor([
+            total_samples / (len(unique) * count) for count in counts
+        ]).to(self.device)
+
+        logger.info(f"Class distribution: {dict(zip(unique, counts))}")
+        logger.info(f"Class weights: {class_weights.cpu().numpy()}")
+
+        # Create loss function with class weights
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+
         # Convert to tensors
         X_train_t = torch.FloatTensor(X_train).to(self.device)
         y_train_t = torch.LongTensor(y_train).to(self.device)
@@ -261,8 +278,20 @@ class DirectionalPredictor:
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True
+            shuffle=True,
+            drop_last=True  # Drop last incomplete batch
         )
+
+        # Update scheduler steps_per_epoch
+        if hasattr(self.scheduler, 'total_steps'):
+            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optimizer,
+                max_lr=self.optimizer.param_groups[0]['lr'] * 2,
+                epochs=epochs,
+                steps_per_epoch=len(train_loader),
+                pct_start=0.1,
+                anneal_strategy='cos'
+            )
 
         if X_val is not None and y_val is not None:
             X_val_t = torch.FloatTensor(X_val).to(self.device)

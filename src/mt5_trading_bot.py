@@ -205,11 +205,14 @@ class MT5TradingBot:
         logger.info(f"Training data: {len(df)} bars with {len(df.columns)} features")
 
         # Prepare directional sequences for classification
+        # Use higher threshold to reduce neutral class
+        direction_threshold = 0.0008 if 'XAU' in symbol else 0.0004
+        logger.info(f"Using direction threshold: {direction_threshold}")
         X, y, feature_names = self.preprocessor.prepare_directional_sequences(
             df,
             sequence_length=self.config.neural_network.lstm_sequence_length,
             prediction_horizon=1,
-            direction_threshold=0.0002,  # 0.02% threshold for XAUUSD
+            direction_threshold=direction_threshold,
             target_col='close'
         )
 
@@ -219,25 +222,25 @@ class MT5TradingBot:
         # Split data
         splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15)
 
-        # Train Directional LSTM
+        # Train Directional LSTM with improved hyperparameters
         logger.info("Training Directional LSTM model...")
         self.lstm_model = DirectionalPredictor(
             input_size=input_size,
             model_type='lstm',
-            hidden_size=min(128, self.config.neural_network.lstm_hidden_size),
-            num_layers=min(2, self.config.neural_network.lstm_num_layers),
-            dropout=0.3,
+            hidden_size=96,  # Reduced to prevent overfitting
+            num_layers=2,
+            dropout=0.2,  # Reduced dropout
             num_classes=3,
-            learning_rate=1e-3,
-            weight_decay=1e-4
+            learning_rate=5e-4,  # Lower LR for stability
+            weight_decay=1e-5
         )
 
         self.lstm_model.train(
             splits['X_train'], splits['y_train'],
             splits['X_val'], splits['y_val'],
             epochs=100,
-            batch_size=32,
-            early_stopping_patience=15
+            batch_size=64,  # Larger batch
+            early_stopping_patience=20  # More patience
         )
         results['lstm'] = self.lstm_model.evaluate(splits['X_test'], splits['y_test'])
         logger.info(f"LSTM Results: Accuracy={results['lstm']['accuracy']:.4f}, "
@@ -248,25 +251,25 @@ class MT5TradingBot:
             logger.warning(f"LSTM balanced accuracy ({results['lstm']['balanced_accuracy']:.4f}) "
                           "below 50%! Model needs improvement.")
 
-        # Train Directional GRU
+        # Train Directional GRU with improved hyperparameters
         logger.info("Training Directional GRU model...")
         self.gru_model = DirectionalPredictor(
             input_size=input_size,
             model_type='gru',
-            hidden_size=min(128, self.config.neural_network.gru_hidden_size),
+            hidden_size=96,  # Reduced to prevent overfitting
             num_layers=2,
-            dropout=0.3,
+            dropout=0.2,  # Reduced dropout
             num_classes=3,
-            learning_rate=1e-3,
-            weight_decay=1e-4
+            learning_rate=5e-4,  # Lower LR for stability
+            weight_decay=1e-5
         )
 
         self.gru_model.train(
             splits['X_train'], splits['y_train'],
             splits['X_val'], splits['y_val'],
             epochs=100,
-            batch_size=32,
-            early_stopping_patience=15
+            batch_size=64,  # Larger batch
+            early_stopping_patience=20  # More patience
         )
         results['gru'] = self.gru_model.evaluate(splits['X_test'], splits['y_test'])
         logger.info(f"GRU Results: Accuracy={results['gru']['accuracy']:.4f}, "

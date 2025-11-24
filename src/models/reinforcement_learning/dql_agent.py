@@ -200,13 +200,13 @@ class EfficientPrioritizedReplayBuffer:
         return self.size
 
 
-def calculate_optimal_buffer_size(state_size: int, max_memory_mb: int = 512) -> int:
+def calculate_optimal_buffer_size(state_size: int, max_memory_mb: int = 256) -> int:
     """
     Calculate optimal buffer size based on state size and available memory.
 
     Args:
         state_size: Size of each state vector
-        max_memory_mb: Maximum memory to use in MB
+        max_memory_mb: Maximum memory to use in MB (reduced to 256MB)
 
     Returns:
         Optimal buffer capacity
@@ -218,8 +218,13 @@ def calculate_optimal_buffer_size(state_size: int, max_memory_mb: int = 512) -> 
     max_memory_bytes = max_memory_mb * 1024 * 1024
     optimal_capacity = max_memory_bytes // bytes_per_transition
 
-    # Ensure reasonable bounds
-    optimal_capacity = max(1000, min(optimal_capacity, 100000))
+    # More conservative bounds for large state sizes
+    if state_size > 4000:
+        optimal_capacity = min(optimal_capacity, 5000)  # Cap at 5K for large states
+    else:
+        optimal_capacity = min(optimal_capacity, 10000)  # Cap at 10K otherwise
+
+    optimal_capacity = max(1000, optimal_capacity)  # Minimum 1000
 
     logger.info(f"Calculated buffer size: {optimal_capacity} "
                f"(state_size={state_size}, max_memory={max_memory_mb}MB)")
