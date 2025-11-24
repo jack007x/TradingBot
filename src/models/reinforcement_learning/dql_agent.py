@@ -1,12 +1,13 @@
 """
 Deep Q-Learning (DQL) agent for trading.
+Memory-optimized implementation with adaptive buffer sizing.
 """
 
+import gc
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from collections import deque
 import random
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
@@ -69,11 +70,28 @@ class DQNetwork(nn.Module):
             return self.network(x)
 
 
-class ReplayBuffer:
-    """Experience replay buffer."""
+class EfficientReplayBuffer:
+    """
+    Memory-efficient replay buffer using pre-allocated numpy arrays.
+    Uses float32 for states and avoids Python list overhead.
+    """
 
-    def __init__(self, capacity: int = 100000):
-        self.buffer = deque(maxlen=capacity)
+    def __init__(self, capacity: int, state_size: int):
+        self.capacity = capacity
+        self.state_size = state_size
+        self.position = 0
+        self.size = 0
+
+        # Pre-allocate arrays
+        self.states = np.zeros((capacity, state_size), dtype=np.float32)
+        self.actions = np.zeros(capacity, dtype=np.int64)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_states = np.zeros((capacity, state_size), dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=np.float32)
+
+        logger.info(f"EfficientReplayBuffer initialized: capacity={capacity}, "
+                   f"state_size={state_size}, "
+                   f"memory={capacity * state_size * 4 * 2 / 1024 / 1024:.1f} MB")
 
     def push(
         self,
@@ -83,32 +101,54 @@ class ReplayBuffer:
         next_state: np.ndarray,
         done: bool
     ):
-        self.buffer.append((state, action, reward, next_state, done))
+        self.states[self.position] = state
+        self.actions[self.position] = action
+        self.rewards[self.position] = reward
+        self.next_states[self.position] = next_state
+        self.dones[self.position] = float(done)
+
+        self.position = (self.position + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int) -> Tuple:
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        indices = np.random.choice(self.size, batch_size, replace=False)
         return (
-            np.array(states),
-            np.array(actions),
-            np.array(rewards),
-            np.array(next_states),
-            np.array(dones)
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices]
         )
 
     def __len__(self) -> int:
-        return len(self.buffer)
+        return self.size
 
 
-class PrioritizedReplayBuffer:
-    """Prioritized experience replay buffer."""
+class EfficientPrioritizedReplayBuffer:
+    """
+    Memory-efficient prioritized experience replay buffer.
+    Uses pre-allocated numpy arrays to minimize memory fragmentation.
+    """
 
-    def __init__(self, capacity: int = 100000, alpha: float = 0.6):
+    def __init__(self, capacity: int, state_size: int, alpha: float = 0.6):
         self.capacity = capacity
+        self.state_size = state_size
         self.alpha = alpha
-        self.buffer = []
-        self.priorities = np.zeros(capacity, dtype=np.float32)
         self.position = 0
+        self.size = 0
+
+        # Pre-allocate arrays
+        self.states = np.zeros((capacity, state_size), dtype=np.float32)
+        self.actions = np.zeros(capacity, dtype=np.int64)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_states = np.zeros((capacity, state_size), dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=np.float32)
+        self.priorities = np.ones(capacity, dtype=np.float32)
+
+        # Calculate memory usage
+        memory_mb = (capacity * state_size * 4 * 2 + capacity * 4 * 3) / 1024 / 1024
+        logger.info(f"EfficientPrioritizedReplayBuffer initialized: capacity={capacity}, "
+                   f"state_size={state_size}, memory={memory_mb:.1f} MB")
 
     def push(
         self,
@@ -118,53 +158,79 @@ class PrioritizedReplayBuffer:
         next_state: np.ndarray,
         done: bool
     ):
-        max_priority = self.priorities.max() if self.buffer else 1.0
+        max_priority = self.priorities[:self.size].max() if self.size > 0 else 1.0
 
-        if len(self.buffer) < self.capacity:
-            self.buffer.append((state, action, reward, next_state, done))
-        else:
-            self.buffer[self.position] = (state, action, reward, next_state, done)
-
+        self.states[self.position] = state
+        self.actions[self.position] = action
+        self.rewards[self.position] = reward
+        self.next_states[self.position] = next_state
+        self.dones[self.position] = float(done)
         self.priorities[self.position] = max_priority
-        self.position = (self.position + 1) % self.capacity
 
-    def sample(self, batch_size: int, beta: float = 0.4) -> Tuple:
-        if len(self.buffer) < batch_size:
+        self.position = (self.position + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size: int, beta: float = 0.4) -> Optional[Tuple]:
+        if self.size < batch_size:
             return None
 
-        priorities = self.priorities[:len(self.buffer)]
+        priorities = self.priorities[:self.size]
         probabilities = priorities ** self.alpha
         probabilities /= probabilities.sum()
 
-        indices = np.random.choice(len(self.buffer), batch_size, p=probabilities)
+        indices = np.random.choice(self.size, batch_size, p=probabilities, replace=False)
 
-        weights = (len(self.buffer) * probabilities[indices]) ** (-beta)
+        weights = (self.size * probabilities[indices]) ** (-beta)
         weights /= weights.max()
 
-        batch = [self.buffer[i] for i in indices]
-        states, actions, rewards, next_states, dones = zip(*batch)
-
         return (
-            np.array(states),
-            np.array(actions),
-            np.array(rewards),
-            np.array(next_states),
-            np.array(dones),
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices],
             indices,
-            weights
+            weights.astype(np.float32)
         )
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        for idx, priority in zip(indices, priorities):
-            self.priorities[idx] = priority
+        self.priorities[indices] = priorities
 
     def __len__(self) -> int:
-        return len(self.buffer)
+        return self.size
+
+
+def calculate_optimal_buffer_size(state_size: int, max_memory_mb: int = 512) -> int:
+    """
+    Calculate optimal buffer size based on state size and available memory.
+
+    Args:
+        state_size: Size of each state vector
+        max_memory_mb: Maximum memory to use in MB
+
+    Returns:
+        Optimal buffer capacity
+    """
+    # Memory per transition: state + next_state + action + reward + done + priority
+    # = 2 * state_size * 4 (float32) + 8 (int64) + 4 (float32) + 4 (float32) + 4 (float32)
+    bytes_per_transition = 2 * state_size * 4 + 8 + 4 + 4 + 4
+
+    max_memory_bytes = max_memory_mb * 1024 * 1024
+    optimal_capacity = max_memory_bytes // bytes_per_transition
+
+    # Ensure reasonable bounds
+    optimal_capacity = max(1000, min(optimal_capacity, 100000))
+
+    logger.info(f"Calculated buffer size: {optimal_capacity} "
+               f"(state_size={state_size}, max_memory={max_memory_mb}MB)")
+
+    return int(optimal_capacity)
 
 
 class DQLTradingAgent:
     """
     Deep Q-Learning agent for trading with self-learning capabilities.
+    Memory-optimized implementation.
     """
 
     def __init__(
@@ -176,7 +242,8 @@ class DQLTradingAgent:
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.01,
         epsilon_decay: float = 0.995,
-        buffer_size: int = 100000,
+        buffer_size: Optional[int] = None,
+        max_buffer_memory_mb: int = 512,
         batch_size: int = 64,
         target_update_freq: int = 1000,
         use_double_dqn: bool = True,
@@ -195,7 +262,8 @@ class DQLTradingAgent:
             epsilon_start: Initial epsilon for exploration
             epsilon_end: Final epsilon
             epsilon_decay: Epsilon decay rate
-            buffer_size: Replay buffer size
+            buffer_size: Replay buffer size (auto-calculated if None)
+            max_buffer_memory_mb: Maximum memory for replay buffer in MB
             batch_size: Training batch size
             target_update_freq: Target network update frequency
             use_double_dqn: Use Double DQN
@@ -228,11 +296,15 @@ class DQLTradingAgent:
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=10000, gamma=0.9)
 
-        # Replay buffer
+        # Calculate optimal buffer size if not provided
+        if buffer_size is None:
+            buffer_size = calculate_optimal_buffer_size(state_size, max_buffer_memory_mb)
+
+        # Memory-efficient replay buffer
         if use_per:
-            self.replay_buffer = PrioritizedReplayBuffer(buffer_size)
+            self.replay_buffer = EfficientPrioritizedReplayBuffer(buffer_size, state_size)
         else:
-            self.replay_buffer = ReplayBuffer(buffer_size)
+            self.replay_buffer = EfficientReplayBuffer(buffer_size, state_size)
         self.use_per = use_per
 
         # Training tracking
@@ -240,6 +312,7 @@ class DQLTradingAgent:
         self.training_losses = []
 
         logger.info(f"DQLTradingAgent initialized on {self.device}")
+        logger.info(f"State size: {state_size}, Buffer size: {buffer_size}")
 
     def select_action(
         self,
@@ -278,10 +351,10 @@ class DQLTradingAgent:
     ):
         """Store transition in replay buffer."""
         self.replay_buffer.push(
-            state.flatten(),
+            state.flatten().astype(np.float32),
             action,
             reward,
-            next_state.flatten(),
+            next_state.flatten().astype(np.float32),
             done
         )
 
@@ -301,7 +374,7 @@ class DQLTradingAgent:
             states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
             weights = torch.ones(self.batch_size).to(self.device)
 
-        # Convert to tensors
+        # Convert to tensors (data is already numpy arrays from efficient buffer)
         states = torch.FloatTensor(states).to(self.device)
         actions = torch.LongTensor(actions).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device)
@@ -393,8 +466,12 @@ class DQLTradingAgent:
             episode_rewards.append(episode_reward)
             episode_losses.append(np.mean(losses) if losses else 0)
 
-            if verbose and (episode + 1) % 100 == 0:
-                avg_reward = np.mean(episode_rewards[-100:])
+            # Periodic garbage collection to prevent memory fragmentation
+            if (episode + 1) % 10 == 0:
+                gc.collect()
+
+            if verbose and (episode + 1) % 10 == 0:
+                avg_reward = np.mean(episode_rewards[-10:])
                 logger.info(f"Episode {episode + 1}/{episodes} - Avg Reward: {avg_reward:.4f} - Epsilon: {self.epsilon:.4f}")
 
         return {
