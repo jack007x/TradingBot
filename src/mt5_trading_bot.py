@@ -23,6 +23,7 @@ from .data.data_preprocessor import DataPreprocessor
 from .models.neural_networks.lstm_model import LSTMPredictor
 from .models.neural_networks.gru_model import GRUPredictor
 from .models.neural_networks.cnn_model import CNNPatternRecognizer
+from .models.neural_networks.directional_predictor import DirectionalPredictor
 from .models.reinforcement_learning.dql_agent import DQLTradingAgent
 from .models.reinforcement_learning.trading_env import TradingEnvironment
 from .models.nlp.sentiment_analyzer import SentimentAnalyzer
@@ -203,12 +204,13 @@ class MT5TradingBot:
 
         logger.info(f"Training data: {len(df)} bars with {len(df.columns)} features")
 
-        # Prepare sequences
-        X, y, feature_names = self.preprocessor.prepare_sequences(
+        # Prepare directional sequences for classification
+        X, y, feature_names = self.preprocessor.prepare_directional_sequences(
             df,
             sequence_length=self.config.neural_network.lstm_sequence_length,
-            target_column='close',
-            prediction_horizon=1
+            prediction_horizon=1,
+            direction_threshold=0.0002,  # 0.02% threshold for XAUUSD
+            target_col='close'
         )
 
         self.feature_columns = feature_names
@@ -217,39 +219,63 @@ class MT5TradingBot:
         # Split data
         splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15)
 
-        # Train LSTM
-        logger.info("Training LSTM model...")
-        self.lstm_model = LSTMPredictor(
+        # Train Directional LSTM
+        logger.info("Training Directional LSTM model...")
+        self.lstm_model = DirectionalPredictor(
             input_size=input_size,
-            hidden_size=self.config.neural_network.lstm_hidden_size,
-            num_layers=self.config.neural_network.lstm_num_layers,
-            dropout=self.config.neural_network.lstm_dropout,
-            learning_rate=self.config.neural_network.lstm_learning_rate
+            model_type='lstm',
+            hidden_size=min(128, self.config.neural_network.lstm_hidden_size),
+            num_layers=min(2, self.config.neural_network.lstm_num_layers),
+            dropout=0.3,
+            num_classes=3,
+            learning_rate=1e-3,
+            weight_decay=1e-4
         )
 
         self.lstm_model.train(
             splits['X_train'], splits['y_train'],
             splits['X_val'], splits['y_val'],
-            epochs=50, early_stopping=15
+            epochs=100,
+            batch_size=32,
+            early_stopping_patience=15
         )
         results['lstm'] = self.lstm_model.evaluate(splits['X_test'], splits['y_test'])
-        logger.info(f"LSTM Results: {results['lstm']}")
+        logger.info(f"LSTM Results: Accuracy={results['lstm']['accuracy']:.4f}, "
+                   f"Balanced={results['lstm']['balanced_accuracy']:.4f}")
 
-        # Train GRU
-        logger.info("Training GRU model...")
-        self.gru_model = GRUPredictor(
+        # Check if accuracy meets minimum threshold
+        if results['lstm']['balanced_accuracy'] < 0.50:
+            logger.warning(f"LSTM balanced accuracy ({results['lstm']['balanced_accuracy']:.4f}) "
+                          "below 50%! Model needs improvement.")
+
+        # Train Directional GRU
+        logger.info("Training Directional GRU model...")
+        self.gru_model = DirectionalPredictor(
             input_size=input_size,
-            hidden_size=self.config.neural_network.gru_hidden_size,
-            num_layers=self.config.neural_network.gru_num_layers
+            model_type='gru',
+            hidden_size=min(128, self.config.neural_network.gru_hidden_size),
+            num_layers=2,
+            dropout=0.3,
+            num_classes=3,
+            learning_rate=1e-3,
+            weight_decay=1e-4
         )
 
         self.gru_model.train(
             splits['X_train'], splits['y_train'],
             splits['X_val'], splits['y_val'],
-            epochs=50, early_stopping=15
+            epochs=100,
+            batch_size=32,
+            early_stopping_patience=15
         )
         results['gru'] = self.gru_model.evaluate(splits['X_test'], splits['y_test'])
-        logger.info(f"GRU Results: {results['gru']}")
+        logger.info(f"GRU Results: Accuracy={results['gru']['accuracy']:.4f}, "
+                   f"Balanced={results['gru']['balanced_accuracy']:.4f}")
+
+        # Check if accuracy meets minimum threshold
+        if results['gru']['balanced_accuracy'] < 0.50:
+            logger.warning(f"GRU balanced accuracy ({results['gru']['balanced_accuracy']:.4f}) "
+                          "below 50%! Model needs improvement.")
 
         # Train DQL Agent
         logger.info("Training DQL agent...")
@@ -271,7 +297,17 @@ class MT5TradingBot:
 
         self.dql_agent.train(env, episodes=100, verbose=True)
         results['dql'] = self.dql_agent.evaluate(env)
-        logger.info(f"DQL Results: {results['dql']}")
+        logger.info(f"DQL Results: Mean Return={results['dql']['mean_return']:.4f}, "
+                   f"Win Rate={results['dql']['mean_win_rate']:.4f}, "
+                   f"Sharpe={results['dql']['mean_sharpe']:.4f}")
+
+        # Check if DQL meets minimum thresholds
+        if results['dql']['mean_return'] < 0:
+            logger.warning(f"DQL mean return ({results['dql']['mean_return']:.4f}) is negative!")
+        if results['dql']['mean_win_rate'] < 0.50:
+            logger.warning(f"DQL win rate ({results['dql']['mean_win_rate']:.4f}) below 50%!")
+        if results['dql']['mean_sharpe'] < 0.5:
+            logger.warning(f"DQL Sharpe ratio ({results['dql']['mean_sharpe']:.4f}) below 0.5!")
 
         # Setup ensemble
         self._setup_ensemble()

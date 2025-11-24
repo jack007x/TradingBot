@@ -395,6 +395,119 @@ class DataPreprocessor:
             'X_test': X_test, 'y_test': y_test
         }
 
+    def create_direction_labels(
+        self,
+        df: pd.DataFrame,
+        prediction_horizon: int = 1,
+        threshold: float = 0.0001,
+        target_col: str = 'close'
+    ) -> np.ndarray:
+        """
+        Create direction labels for classification.
+
+        Labels:
+        - 0: Down (price decreases by more than threshold)
+        - 1: Neutral (price change within threshold)
+        - 2: Up (price increases by more than threshold)
+
+        Args:
+            df: DataFrame with price data
+            prediction_horizon: How many steps ahead to predict
+            threshold: Minimum change to consider as up/down (as percentage)
+            target_col: Column name for target price
+
+        Returns:
+            Array of direction labels (0=down, 1=neutral, 2=up)
+        """
+        prices = df[target_col].values
+        labels = []
+
+        for i in range(len(prices) - prediction_horizon):
+            current = prices[i]
+            future = prices[i + prediction_horizon]
+
+            # Calculate percentage change
+            pct_change = (future - current) / current
+
+            # Classify
+            if pct_change < -threshold:
+                labels.append(0)  # Down
+            elif pct_change > threshold:
+                labels.append(2)  # Up
+            else:
+                labels.append(1)  # Neutral
+
+        labels = np.array(labels)
+
+        # Log class distribution
+        unique, counts = np.unique(labels, return_counts=True)
+        dist = dict(zip(unique, counts))
+        logger.info(f"Direction label distribution: Down={dist.get(0, 0)}, "
+                   f"Neutral={dist.get(1, 0)}, Up={dist.get(2, 0)}")
+
+        return labels
+
+    def prepare_directional_sequences(
+        self,
+        df: pd.DataFrame,
+        sequence_length: int = 60,
+        prediction_horizon: int = 1,
+        direction_threshold: float = 0.0002,
+        target_col: str = 'close',
+        feature_cols: Optional[List[str]] = None
+    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """
+        Prepare sequences with direction labels for classification.
+
+        Args:
+            df: DataFrame with features
+            sequence_length: Length of input sequences
+            prediction_horizon: How many steps ahead to predict
+            direction_threshold: Minimum change for up/down classification
+            target_col: Target column name
+            feature_cols: Feature columns to use (None = all numeric)
+
+        Returns:
+            Tuple of (X sequences, y direction labels, feature column names)
+        """
+        # Select features
+        if feature_cols is None:
+            feature_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            # Remove target column from features
+            if target_col in feature_cols:
+                feature_cols.remove(target_col)
+
+        # Convert to numpy
+        data = df[feature_cols].values
+
+        # Create direction labels
+        full_df_for_labels = df[[target_col]].copy()
+        direction_labels = self.create_direction_labels(
+            full_df_for_labels,
+            prediction_horizon=prediction_horizon,
+            threshold=direction_threshold,
+            target_col=target_col
+        )
+
+        # Create sequences
+        X = []
+        y = []
+
+        for i in range(sequence_length, len(data)):
+            # Only create sequence if we have a label for this position
+            label_idx = i - 1  # Label at position i-1 corresponds to sequence ending at i
+            if label_idx < len(direction_labels):
+                X.append(data[i - sequence_length:i])
+                y.append(direction_labels[label_idx])
+
+        X = np.array(X)
+        y = np.array(y)
+
+        logger.info(f"Created {len(X)} directional sequences of shape {X.shape[1:]}")
+        logger.info(f"Label distribution: {np.bincount(y)}")
+
+        return X, y, feature_cols
+
     def create_chart_images(
         self,
         df: pd.DataFrame,

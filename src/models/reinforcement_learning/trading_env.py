@@ -144,15 +144,18 @@ class TradingEnvironment(gym.Env):
         """
         current_price = self._get_current_price()
         prev_portfolio_value = self.balance + self._get_unrealized_pnl()
+        prev_unrealized_pnl = self._get_unrealized_pnl()
 
         # Execute action
         reward = 0.0
         trade_info = None
+        closed_trade_pnl = 0.0
 
         if action == 1 and self.position <= 0:  # Buy
             if self.position < 0:  # Close short first
-                pnl = self._close_position(current_price)
-                reward += pnl / self.initial_balance
+                closed_trade_pnl = self._close_position(current_price)
+                # Strongly reward profitable trades
+                reward += (closed_trade_pnl / self.initial_balance) * 100
 
             # Open long
             self._open_position(current_price, self.max_position_size)
@@ -160,8 +163,9 @@ class TradingEnvironment(gym.Env):
 
         elif action == 2 and self.position >= 0:  # Sell
             if self.position > 0:  # Close long first
-                pnl = self._close_position(current_price)
-                reward += pnl / self.initial_balance
+                closed_trade_pnl = self._close_position(current_price)
+                # Strongly reward profitable trades
+                reward += (closed_trade_pnl / self.initial_balance) * 100
 
             # Open short
             self._open_position(current_price, -self.max_position_size)
@@ -170,17 +174,23 @@ class TradingEnvironment(gym.Env):
         # Move to next step
         self.current_step += 1
 
-        # Calculate reward based on portfolio value change
+        # Calculate new portfolio value
         new_price = self._get_current_price()
-        new_portfolio_value = self.balance + self._get_unrealized_pnl()
-        portfolio_return = (new_portfolio_value - prev_portfolio_value) / prev_portfolio_value
+        new_unrealized_pnl = self._get_unrealized_pnl()
+        new_portfolio_value = self.balance + new_unrealized_pnl
 
-        # Reward shaping
-        reward += portfolio_return * self.reward_scaling
+        # Reward for holding profitable positions
+        if self.position != 0:
+            unrealized_change = new_unrealized_pnl - prev_unrealized_pnl
+            # Reward holding winning positions, penalize holding losing positions
+            if new_unrealized_pnl > 0:
+                reward += (unrealized_change / self.initial_balance) * 50  # Reward
+            else:
+                reward += (unrealized_change / self.initial_balance) * 100  # Stronger penalty for losses
 
-        # Penalize excessive trading
-        if trade_info:
-            reward -= self.transaction_cost * 0.5
+        # Small penalty for excessive trading
+        if trade_info and closed_trade_pnl <= 0:
+            reward -= 0.1  # Only penalize unprofitable trades
 
         # Update max balance for drawdown calculation
         self.max_balance = max(self.max_balance, new_portfolio_value)
@@ -189,15 +199,19 @@ class TradingEnvironment(gym.Env):
         terminated = False
         truncated = False
 
-        # Terminate if bankrupt
+        # Terminate if significant loss
         if new_portfolio_value < self.initial_balance * 0.5:
             terminated = True
-            reward -= 1.0  # Large penalty for bankruptcy
+            reward -= 10.0  # Large penalty for big losses
 
         # Truncate if max steps reached
         if self.current_step >= len(self.data) - 1 or \
            self.current_step - self.window_size >= self.max_steps:
             truncated = True
+            # Close any open position at end
+            if self.position != 0:
+                final_pnl = self._close_position(new_price)
+                reward += (final_pnl / self.initial_balance) * 100
 
         # Info dict
         info = {
@@ -207,7 +221,8 @@ class TradingEnvironment(gym.Env):
             'total_trades': self.total_trades,
             'win_rate': self.winning_trades / max(1, self.total_trades),
             'total_pnl': self.total_pnl,
-            'max_drawdown': (self.max_balance - new_portfolio_value) / self.max_balance
+            'max_drawdown': (self.max_balance - new_portfolio_value) / self.max_balance,
+            'closed_trade_pnl': closed_trade_pnl
         }
 
         return self._get_observation(), reward, terminated, truncated, info
