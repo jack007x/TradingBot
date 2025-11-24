@@ -494,11 +494,12 @@ class DataPreprocessor:
         y = []
 
         for i in range(sequence_length, len(data)):
-            # Only create sequence if we have a label for this position
-            label_idx = i - 1  # Label at position i-1 corresponds to sequence ending at i
-            if label_idx < len(direction_labels):
+            # Label is for bar AFTER the sequence window
+            # Sequence: [i-sequence_length:i] (bars 0 to i-1)
+            # Label: direction_labels[i] (comparing bar i to bar i+prediction_horizon)
+            if i < len(direction_labels):
                 X.append(data[i - sequence_length:i])
-                y.append(direction_labels[label_idx])
+                y.append(direction_labels[i])
 
         X = np.array(X)
         y = np.array(y)

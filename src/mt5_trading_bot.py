@@ -280,22 +280,34 @@ class MT5TradingBot:
             logger.warning(f"GRU balanced accuracy ({results['gru']['balanced_accuracy']:.4f}) "
                           "below 50%! Model needs improvement.")
 
-        # Train DQL Agent
-        logger.info("Training DQL agent...")
-        df_clean = df.select_dtypes(include=[np.number]).dropna()
-        # State size includes market features + 3 account features (position, balance, unrealized_pnl)
-        state_size = (len(df_clean.columns) + 3) * self.config.neural_network.lstm_sequence_length
+        # Train DQL Agent with reduced features and window
+        logger.info("Training DQL agent with compact state...")
+        from ..utils.feature_selector import SimpleFeatureSelector
+
+        # Select only essential features for RL (10-15 features)
+        df_rl, rl_features = SimpleFeatureSelector.select_features(df)
+
+        # Use small window for RL (10 bars instead of 60)
+        rl_window = 10
+        # State size: essential features + 3 account features
+        state_size = (len(rl_features) + 3) * rl_window
+
+        logger.info(f"DQL State: {len(rl_features)} features × {rl_window} window = {state_size} dims")
 
         self.dql_agent = DQLTradingAgent(
             state_size=state_size,
             action_size=3,
-            learning_rate=self.config.reinforcement_learning.dql_learning_rate
+            learning_rate=1e-4,
+            epsilon_start=1.0,
+            epsilon_end=0.05,
+            epsilon_decay_steps=20000,
+            max_buffer_memory_mb=128
         )
 
         env = TradingEnvironment(
-            df=df_clean.values,
-            feature_columns=list(df_clean.columns),
-            window_size=self.config.neural_network.lstm_sequence_length
+            df=df_rl.values,
+            feature_columns=rl_features,
+            window_size=rl_window
         )
 
         self.dql_agent.train(env, episodes=100, verbose=True)

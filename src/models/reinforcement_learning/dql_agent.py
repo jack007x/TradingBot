@@ -245,10 +245,10 @@ class DQLTradingAgent:
         learning_rate: float = 1e-4,
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
-        epsilon_end: float = 0.01,
-        epsilon_decay: float = 0.995,
+        epsilon_end: float = 0.05,
+        epsilon_decay_steps: int = 20000,
         buffer_size: Optional[int] = None,
-        max_buffer_memory_mb: int = 512,
+        max_buffer_memory_mb: int = 128,
         batch_size: int = 64,
         target_update_freq: int = 1000,
         use_double_dqn: bool = True,
@@ -264,11 +264,11 @@ class DQLTradingAgent:
             action_size: Size of action space
             learning_rate: Learning rate
             gamma: Discount factor
-            epsilon_start: Initial epsilon for exploration
-            epsilon_end: Final epsilon
-            epsilon_decay: Epsilon decay rate
+            epsilon_start: Initial epsilon for exploration (1.0)
+            epsilon_end: Final epsilon (0.05)
+            epsilon_decay_steps: Steps for linear epsilon decay (20000)
             buffer_size: Replay buffer size (auto-calculated if None)
-            max_buffer_memory_mb: Maximum memory for replay buffer in MB
+            max_buffer_memory_mb: Maximum memory for replay buffer in MB (128MB)
             batch_size: Training batch size
             target_update_freq: Target network update frequency
             use_double_dqn: Use Double DQN
@@ -280,8 +280,9 @@ class DQLTradingAgent:
         self.action_size = action_size
         self.gamma = gamma
         self.epsilon = epsilon_start
+        self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
-        self.epsilon_decay = epsilon_decay
+        self.epsilon_decay_steps = epsilon_decay_steps
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
         self.use_double_dqn = use_double_dqn
@@ -420,8 +421,11 @@ class DQLTradingAgent:
         if self.steps % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        # Linear epsilon decay
+        if self.steps < self.epsilon_decay_steps:
+            self.epsilon = self.epsilon_start - (self.epsilon_start - self.epsilon_end) * (self.steps / self.epsilon_decay_steps)
+        else:
+            self.epsilon = self.epsilon_end
 
         return loss.item()
 

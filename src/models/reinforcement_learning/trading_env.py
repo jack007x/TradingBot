@@ -134,7 +134,7 @@ class TradingEnvironment(gym.Env):
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
-        Execute one step in the environment.
+        Execute one step in the environment with equity-based reward.
 
         Args:
             action: 0=hold, 1=buy, 2=sell
@@ -142,87 +142,89 @@ class TradingEnvironment(gym.Env):
         Returns:
             observation, reward, terminated, truncated, info
         """
+        prev_equity = self.balance + self._get_unrealized_pnl()
         current_price = self._get_current_price()
-        prev_portfolio_value = self.balance + self._get_unrealized_pnl()
-        prev_unrealized_pnl = self._get_unrealized_pnl()
 
         # Execute action
-        reward = 0.0
-        trade_info = None
+        trade_cost = 0.0
         closed_trade_pnl = 0.0
 
         if action == 1 and self.position <= 0:  # Buy
             if self.position < 0:  # Close short first
                 closed_trade_pnl = self._close_position(current_price)
-                # Strongly reward profitable trades
-                reward += (closed_trade_pnl / self.initial_balance) * 100
+                trade_cost += self.transaction_cost
 
             # Open long
             self._open_position(current_price, self.max_position_size)
-            trade_info = 'buy'
+            trade_cost += self.transaction_cost
 
         elif action == 2 and self.position >= 0:  # Sell
             if self.position > 0:  # Close long first
                 closed_trade_pnl = self._close_position(current_price)
-                # Strongly reward profitable trades
-                reward += (closed_trade_pnl / self.initial_balance) * 100
+                trade_cost += self.transaction_cost
 
             # Open short
             self._open_position(current_price, -self.max_position_size)
-            trade_info = 'sell'
+            trade_cost += self.transaction_cost
 
         # Move to next step
         self.current_step += 1
 
-        # Calculate new portfolio value
-        new_price = self._get_current_price()
-        new_unrealized_pnl = self._get_unrealized_pnl()
-        new_portfolio_value = self.balance + new_unrealized_pnl
+        # Calculate new equity
+        new_equity = self.balance + self._get_unrealized_pnl()
 
-        # Reward for holding profitable positions
-        if self.position != 0:
-            unrealized_change = new_unrealized_pnl - prev_unrealized_pnl
-            # Reward holding winning positions, penalize holding losing positions
-            if new_unrealized_pnl > 0:
-                reward += (unrealized_change / self.initial_balance) * 50  # Reward
-            else:
-                reward += (unrealized_change / self.initial_balance) * 100  # Stronger penalty for losses
+        # ===== EQUITY-BASED REWARD =====
+        # 1. Equity change (main signal)
+        equity_change = new_equity - prev_equity
 
-        # Small penalty for excessive trading
-        if trade_info and closed_trade_pnl <= 0:
-            reward -= 0.1  # Only penalize unprofitable trades
+        # 2. Transaction costs
+        fee_penalty = trade_cost * self.initial_balance
 
-        # Update max balance for drawdown calculation
-        self.max_balance = max(self.max_balance, new_portfolio_value)
+        # 3. Risk penalty (discourage over-leveraging)
+        risk_penalty = 0.0
+        if abs(self.position) > 0:
+            # Penalty proportional to position size relative to balance
+            risk_penalty = 0.01 * (abs(self.position) * abs(self._get_unrealized_pnl())) / self.initial_balance
+
+        # Final reward
+        reward = (equity_change / self.initial_balance) * 1000  # Scale to reasonable range
+        reward -= fee_penalty * 10  # Penalize fees
+        reward -= risk_penalty  # Penalize risk
+
+        # Update max equity
+        self.max_balance = max(self.max_balance, new_equity)
 
         # Check termination
         terminated = False
         truncated = False
 
         # Terminate if significant loss
-        if new_portfolio_value < self.initial_balance * 0.5:
+        if new_equity < self.initial_balance * 0.3:  # 70% drawdown
             terminated = True
-            reward -= 10.0  # Large penalty for big losses
+            reward -= 100  # Large penalty
 
         # Truncate if max steps reached
         if self.current_step >= len(self.data) - 1 or \
            self.current_step - self.window_size >= self.max_steps:
             truncated = True
-            # Close any open position at end
+            # Close position at end
             if self.position != 0:
-                final_pnl = self._close_position(new_price)
-                reward += (final_pnl / self.initial_balance) * 100
+                final_pnl = self._close_position(self._get_current_price())
+                reward += (final_pnl / self.initial_balance) * 1000
 
         # Info dict
         info = {
-            'portfolio_value': new_portfolio_value,
+            'equity': new_equity,
+            'equity_change': equity_change,
             'position': self.position,
             'balance': self.balance,
             'total_trades': self.total_trades,
             'win_rate': self.winning_trades / max(1, self.total_trades),
             'total_pnl': self.total_pnl,
-            'max_drawdown': (self.max_balance - new_portfolio_value) / self.max_balance,
-            'closed_trade_pnl': closed_trade_pnl
+            'max_drawdown': (self.max_balance - new_equity) / self.max_balance,
+            'closed_trade_pnl': closed_trade_pnl,
+            'trade_cost': fee_penalty,
+            'risk_penalty': risk_penalty
         }
 
         return self._get_observation(), reward, terminated, truncated, info
