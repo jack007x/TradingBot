@@ -11,10 +11,13 @@ general:
 
 # Trading Settings
 trading:
+  platform: "mt5"  # mt5, exchange
   symbols:
-    - "BTC/USDT"
-    - "ETH/USDT"
-    - "EUR/USD"
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "XAUUSD"
+    - "BTCUSD"
   timeframes:
     - "1m"
     - "5m"
@@ -24,8 +27,9 @@ trading:
     - "1d"
   default_timeframe: "1h"
   max_open_positions: 5
-  use_leverage: false
-  max_leverage: 3
+  use_leverage: true
+  max_leverage: 100
+  default_lot_size: 0.01
 
 # Risk Management
 risk:
@@ -143,7 +147,27 @@ api:
   enable_websocket: true
   cors_origins: ["*"]
 
-# Exchange Settings
+# MetaTrader 5 Settings
+mt5:
+  # Path to MT5 terminal (optional, auto-detect if not set)
+  path: null  # e.g., "C:/Program Files/MetaTrader 5/terminal64.exe"
+  # Login credentials (can also use environment variables)
+  login: null  # MT5 account number
+  password: null  # MT5 password
+  server: null  # Broker server name
+  # Trading settings
+  magic_number: 123456  # EA identification number
+  deviation: 20  # Max price deviation in points
+  fill_policy: "ioc"  # fok, ioc, return
+  # Connection settings
+  timeout: 60000  # Connection timeout ms
+  portable: false  # Use portable mode
+  # Auto-reconnect
+  auto_reconnect: true
+  reconnect_delay: 5  # seconds
+  max_reconnect_attempts: 3
+
+# Exchange Settings (for crypto, optional)
 exchange:
   name: "binance"
   testnet: true

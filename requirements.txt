@@ -40,7 +40,11 @@ shap>=0.43.0
 lime>=0.2.0.1
 captum>=0.6.0
 
-# Market Data APIs
+# MetaTrader 5
+MetaTrader5>=5.0.45
+pytz>=2023.3
+
+# Market Data APIs (optional, for additional data sources)
 ccxt>=4.1.0
 yfinance>=0.2.31
 alpha-vantage>=2.3.1

@@ -4,11 +4,16 @@ AI Trading Bot - Self-Learning Trading System
 ==============================================
 
 Main entry point for the AI Trading Bot.
+Supports both MetaTrader 5 and cryptocurrency exchanges.
 
 Usage:
-    python main.py --mode paper --train --symbols BTC/USDT ETH/USDT
-    python main.py --mode live --load-models
-    python main.py --backtest --symbol BTC/USDT --days 90
+    # MetaTrader 5:
+    python main.py --platform mt5 --train --symbols EURUSD GBPUSD
+    python main.py --platform mt5 --mode paper --symbols EURUSD
+
+    # Crypto Exchange:
+    python main.py --platform exchange --train --symbols BTC/USDT ETH/USDT
+    python main.py --platform exchange --mode paper --symbols BTC/USDT
 """
 
 import asyncio
@@ -19,62 +24,116 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.trading_bot import AITradingBot
 from src.utils.logger import setup_logger
 from loguru import logger
 
 
-async def run_training(bot: AITradingBot, symbols: list, days: int):
-    """Train all models."""
-    logger.info("Starting model training...")
-
-    for symbol in symbols:
-        results = await bot.train_models(symbol=symbol, days=days)
-        logger.info(f"Training results for {symbol}:")
-        for model, metrics in results.items():
-            logger.info(f"  {model}: {metrics}")
-
-    # Run optimization
-    logger.info("Running genetic algorithm optimization...")
-    opt_results = await bot.run_optimization(symbols[0])
-    logger.info(f"Optimization complete. Best fitness: {opt_results.get('best_fitness', 'N/A')}")
-
-    # Save models
-    await bot.save_state()
-    logger.info("Models saved successfully")
-
-
-async def run_backtest(bot: AITradingBot, symbol: str, days: int):
-    """Run backtest simulation."""
-    logger.info(f"Running backtest for {symbol} over {days} days...")
-
-    # Load models if available
-    try:
-        await bot.load_state()
-    except FileNotFoundError:
-        logger.info("No saved models found, training new models...")
-        await bot.train_models(symbol=symbol, days=days)
-
-    # Backtest logic would go here
-    # For now, just show status
-    status = bot.get_status()
-    logger.info(f"Backtest status: {status}")
+def print_banner():
+    """Print application banner."""
+    print("""
+    ╔═══════════════════════════════════════════════════════════════════╗
+    ║         AI Trading Bot - Self-Learning Trading System             ║
+    ║                                                                   ║
+    ║  Supported Platforms:                                             ║
+    ║  • MetaTrader 5 (Forex, CFDs, Indices, Commodities)              ║
+    ║  • Crypto Exchanges (Binance, etc.)                              ║
+    ║                                                                   ║
+    ║  AI Features:                                                     ║
+    ║  • Deep Learning (LSTM, GRU, CNN)                                ║
+    ║  • Reinforcement Learning (PPO, DQL)                             ║
+    ║  • NLP Sentiment Analysis (FinBERT)                              ║
+    ║  • Genetic Algorithm Optimization                                 ║
+    ║  • Explainable AI (SHAP, LIME)                                   ║
+    ║  • Self-Learning Strategy Adaptation                              ║
+    ╚═══════════════════════════════════════════════════════════════════╝
+    """)
 
 
-async def run_live_trading(bot: AITradingBot, symbols: list, interval: int):
-    """Run live/paper trading."""
-    logger.info(f"Starting {'paper' if bot.mode == 'paper' else 'live'} trading...")
+async def run_mt5_bot(args):
+    """Run MetaTrader 5 trading bot."""
+    from src.mt5_trading_bot import MT5TradingBot
 
-    # Load models
-    try:
-        await bot.load_state()
-        logger.info("Loaded existing models")
-    except FileNotFoundError:
-        logger.error("No trained models found. Please train models first.")
+    bot = MT5TradingBot(config_path=args.config, mode=args.mode)
+
+    if not bot.initialize():
+        logger.error("Failed to initialize MT5 bot")
         return
 
-    # Start trading loop
-    await bot.run(symbols=symbols, interval=interval)
+    try:
+        if args.train:
+            logger.info("Starting model training...")
+            for symbol in args.symbols:
+                results = bot.train_models(symbol=symbol, days=args.days)
+                logger.info(f"Training results for {symbol}: {results}")
+            bot.save_state()
+            logger.info("Models saved successfully")
+
+        if not args.train or args.mode != 'backtest':
+            # Load models if not training
+            if not args.train:
+                try:
+                    bot.load_state()
+                    logger.info("Loaded existing models")
+                except FileNotFoundError:
+                    logger.error("No trained models found. Please train models first with --train")
+                    return
+
+            # Start trading
+            await bot.run(symbols=args.symbols, interval=args.interval)
+
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        bot.stop()
+
+
+async def run_exchange_bot(args):
+    """Run cryptocurrency exchange trading bot."""
+    from src.trading_bot import AITradingBot
+
+    bot = AITradingBot(config_path=args.config, mode=args.mode)
+    await bot.initialize()
+
+    try:
+        if args.train:
+            logger.info("Starting model training...")
+            for symbol in args.symbols:
+                results = await bot.train_models(symbol=symbol, days=args.days)
+                logger.info(f"Training results for {symbol}: {results}")
+
+            # Run optimization
+            logger.info("Running genetic algorithm optimization...")
+            opt_results = await bot.run_optimization(args.symbols[0])
+            logger.info(f"Optimization complete. Best fitness: {opt_results.get('best_fitness', 'N/A')}")
+
+            await bot.save_state()
+            logger.info("Models saved successfully")
+
+        if args.backtest:
+            logger.info(f"Running backtest for {args.symbol} over {args.days} days...")
+            try:
+                await bot.load_state()
+            except FileNotFoundError:
+                logger.info("No saved models found, training new models...")
+                await bot.train_models(symbol=args.symbol, days=args.days)
+            status = bot.get_status()
+            logger.info(f"Backtest status: {status}")
+
+        elif not args.train:
+            # Load models and start trading
+            try:
+                await bot.load_state()
+                logger.info("Loaded existing models")
+            except FileNotFoundError:
+                logger.error("No trained models found. Please train models first with --train")
+                return
+
+            await bot.run(symbols=args.symbols, interval=args.interval)
+
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        bot.stop()
 
 
 def main():
@@ -84,18 +143,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Train models:
-    python main.py --train --symbols BTC/USDT ETH/USDT --days 365
+  MetaTrader 5:
+    python main.py --platform mt5 --train --symbols EURUSD GBPUSD --days 365
+    python main.py --platform mt5 --mode paper --symbols EURUSD XAUUSD
+    python main.py --platform mt5 --mode live --symbols EURUSD --interval 60
 
-  Paper trading:
-    python main.py --mode paper --symbols BTC/USDT
-
-  Live trading (use with caution):
-    python main.py --mode live --symbols BTC/USDT --interval 60
+  Crypto Exchange:
+    python main.py --platform exchange --train --symbols BTC/USDT ETH/USDT
+    python main.py --platform exchange --mode paper --symbols BTC/USDT
 
   Backtest:
-    python main.py --backtest --symbol BTC/USDT --days 90
+    python main.py --platform exchange --backtest --symbol BTC/USDT --days 90
         """
+    )
+
+    parser.add_argument(
+        '--platform',
+        choices=['mt5', 'exchange'],
+        default='mt5',
+        help='Trading platform (default: mt5)'
     )
 
     parser.add_argument(
@@ -120,14 +186,14 @@ Examples:
     parser.add_argument(
         '--symbols',
         nargs='+',
-        default=['BTC/USDT'],
-        help='Trading symbols (default: BTC/USDT)'
+        default=['EURUSD'],
+        help='Trading symbols (default: EURUSD for MT5, BTC/USDT for exchange)'
     )
 
     parser.add_argument(
         '--symbol',
         type=str,
-        default='BTC/USDT',
+        default='EURUSD',
         help='Single symbol for backtest'
     )
 
@@ -165,40 +231,24 @@ Examples:
     setup_logger(level=args.log_level)
 
     # Print banner
-    print("""
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║           AI Trading Bot - Self-Learning System               ║
-    ║                                                               ║
-    ║  Features:                                                    ║
-    ║  • Deep Learning (LSTM, GRU, CNN)                            ║
-    ║  • Reinforcement Learning (PPO, DQL)                         ║
-    ║  • NLP Sentiment Analysis                                     ║
-    ║  • Genetic Algorithm Optimization                             ║
-    ║  • Explainable AI (SHAP, LIME)                               ║
-    ║  • Self-Learning Strategy Adaptation                          ║
-    ╚═══════════════════════════════════════════════════════════════╝
-    """)
+    print_banner()
 
-    # Create bot
-    bot = AITradingBot(config_path=args.config, mode=args.mode)
+    # Set default symbols based on platform
+    if args.symbols == ['EURUSD'] and args.platform == 'exchange':
+        args.symbols = ['BTC/USDT']
+    elif args.symbols == ['EURUSD'] and args.symbol == 'EURUSD' and args.platform == 'exchange':
+        args.symbol = 'BTC/USDT'
 
-    # Run async main
-    async def async_main():
-        await bot.initialize()
+    logger.info(f"Platform: {args.platform.upper()}")
+    logger.info(f"Mode: {args.mode}")
+    logger.info(f"Symbols: {args.symbols}")
 
-        if args.train:
-            await run_training(bot, args.symbols, args.days)
-
-        if args.backtest:
-            await run_backtest(bot, args.symbol, args.days)
-        elif not args.train:
-            await run_live_trading(bot, args.symbols, args.interval)
-
+    # Run appropriate bot
     try:
-        asyncio.run(async_main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        bot.stop()
+        if args.platform == 'mt5':
+            asyncio.run(run_mt5_bot(args))
+        else:
+            asyncio.run(run_exchange_bot(args))
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
