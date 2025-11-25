@@ -355,7 +355,7 @@ class DataPreprocessor:
         y: np.ndarray,
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
-        shuffle: bool = False,
+        shuffle: bool = True,
         stratify: bool = True
     ) -> Dict[str, np.ndarray]:
         """
@@ -451,16 +451,17 @@ class DataPreprocessor:
         median_close = df['close'].median()
 
         # Calculate threshold as ATR / close (as percentage)
-        # CRITICAL FIX: Use 70% of ATR (was 30% - too conservative)
-        # 70% gives more meaningful price moves while filtering noise
-        threshold = (atr_value / median_close) * 0.7
+        # CRITICAL FIX: Use 200% of ATR (was 70% - still too conservative!)
+        # For volatile assets like XAUUSD, need higher threshold to reduce neutral class
+        # Target: 0.3-0.5% threshold for XAUUSD to get balanced classes
+        threshold = (atr_value / median_close) * 2.0
 
         # Clamp to min/max
         threshold = max(min_threshold, min(max_threshold, threshold))
 
         logger.info(f"Adaptive threshold calculated: {threshold:.6f} ({threshold*100:.4f}%)")
         logger.info(f"Based on ATR={atr_value:.4f}, median_close={median_close:.2f}")
-        logger.info(f"Using 70% of ATR (increased from 30%) for meaningful price moves")
+        logger.info(f"Using 200% of ATR (increased from 70%) for meaningful price moves")
 
         return threshold
 

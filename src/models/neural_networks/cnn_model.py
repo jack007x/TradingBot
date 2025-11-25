@@ -296,7 +296,7 @@ class CNNPatternRecognizer:
         logger.info(f"CNN model saved to {filepath}")
 
     def load(self, filepath: Union[str, Path]):
-        checkpoint = torch.load(filepath, map_location=self.device)
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.history = checkpoint['history']
         self.pattern_names = checkpoint.get('pattern_names', self.pattern_names)

@@ -676,7 +676,7 @@ class DirectionalPredictor:
 
     def load(self, filepath: Union[str, Path]):
         """Load model from file."""
-        checkpoint = torch.load(filepath, map_location=self.device)
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(checkpoint['model_state'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])

@@ -520,7 +520,7 @@ class LSTMPredictor:
     def load(self, filepath: Union[str, Path]) -> None:
         """Load model from file."""
         filepath = Path(filepath)
-        checkpoint = torch.load(filepath, map_location=self.device)
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -535,7 +535,7 @@ class LSTMPredictor:
         device: Optional[str] = None
     ) -> 'LSTMPredictor':
         """Create predictor from saved checkpoint."""
-        checkpoint = torch.load(filepath, map_location='cpu')
+        checkpoint = torch.load(filepath, map_location='cpu', weights_only=False)
         config = checkpoint['config']
 
         predictor = cls(
