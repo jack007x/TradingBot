@@ -177,6 +177,7 @@ class RegressionPredictor:
         dropout: float = 0.3,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
+        loss_fn: str = 'mse',
         device: Optional[str] = None
     ):
         """
@@ -190,10 +191,12 @@ class RegressionPredictor:
             dropout: Dropout rate
             learning_rate: Learning rate
             weight_decay: L2 regularization
+            loss_fn: Loss function ('mse', 'trading', 'variance', 'huber')
             device: Device to use
         """
         self.input_size = input_size
         self.model_type = model_type
+        self.loss_fn_name = loss_fn
 
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -218,9 +221,30 @@ class RegressionPredictor:
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
-        # MSE Loss (MUCH SIMPLER than Focal Loss!)
-        # NO class weights needed, NO balancing needed
-        self.criterion = nn.MSELoss()
+        # Select loss function
+        # Import custom losses
+        from ...losses.trading_losses import (
+            TradingLoss, VarianceMatchingLoss, HuberLoss
+        )
+
+        if loss_fn == 'mse':
+            # Standard MSE (baseline)
+            self.criterion = nn.MSELoss()
+            self.use_custom_loss = False
+        elif loss_fn == 'trading':
+            # Trading-focused loss (directional + variance)
+            self.criterion = TradingLoss()
+            self.use_custom_loss = True
+        elif loss_fn == 'variance':
+            # Variance matching loss (anti-conservatism)
+            self.criterion = VarianceMatchingLoss()
+            self.use_custom_loss = True
+        elif loss_fn == 'huber':
+            # Huber loss (robust to outliers)
+            self.criterion = HuberLoss()
+            self.use_custom_loss = True
+        else:
+            raise ValueError(f"Unknown loss function: {loss_fn}. Choose from: mse, trading, variance, huber")
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -242,9 +266,13 @@ class RegressionPredictor:
             'val_correlation': []
         }
 
+        # Loss component history (for custom losses)
+        if self.use_custom_loss:
+            self.history['loss_components'] = []
+
         logger.info(f"RegressionPredictor ({model_type.upper()}) initialized on {self.device}")
         logger.info(f"Input size: {input_size}, Hidden: {hidden_size}, Layers: {num_layers}")
-        logger.info(f"Using MSE loss for continuous prediction (NO class imbalance issues!)")
+        logger.info(f"Using {loss_fn.upper()} loss for continuous prediction")
 
     def train(
         self,
@@ -329,12 +357,19 @@ class RegressionPredictor:
             train_losses = []
             train_predictions = []
             train_actuals = []
+            epoch_loss_components = []  # For custom losses
 
             for batch_X, batch_y in train_loader:
                 self.optimizer.zero_grad()
 
                 predictions = self.model(batch_X).squeeze()
-                loss = self.criterion(predictions, batch_y)
+
+                # Handle custom losses that return (loss, components)
+                if self.use_custom_loss:
+                    loss, components = self.criterion(predictions, batch_y)
+                    epoch_loss_components.append(components)
+                else:
+                    loss = self.criterion(predictions, batch_y)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -346,6 +381,13 @@ class RegressionPredictor:
                 train_actuals.extend(batch_y.detach().cpu().numpy())
 
             train_loss = np.mean(train_losses)
+
+            # Average loss components for this epoch
+            if self.use_custom_loss and epoch_loss_components:
+                avg_components = {}
+                for key in epoch_loss_components[0].keys():
+                    avg_components[key] = np.mean([c[key] for c in epoch_loss_components])
+                self.history['loss_components'].append(avg_components)
 
             # Calculate directional accuracy (for trading evaluation)
             train_direction_acc = self._calculate_directional_accuracy(
@@ -373,7 +415,12 @@ class RegressionPredictor:
                         batch_y = y_val_t[i:i+batch_size]
 
                         predictions = self.model(batch_X).squeeze()
-                        loss = self.criterion(predictions, batch_y)
+
+                        # Handle custom losses
+                        if self.use_custom_loss:
+                            loss, _ = self.criterion(predictions, batch_y)
+                        else:
+                            loss = self.criterion(predictions, batch_y)
 
                         val_losses.append(loss.item())
                         val_predictions.extend(predictions.cpu().numpy())
@@ -410,6 +457,21 @@ class RegressionPredictor:
                         f"  Val Predictions - Mean: {np.mean(val_predictions):.6f}, "
                         f"Std: {np.std(val_predictions):.6f}"
                     )
+
+                    # Log custom loss components
+                    if self.use_custom_loss and epoch_loss_components:
+                        comp = avg_components
+                        if 'std_ratio' in comp:
+                            logger.info(
+                                f"  Pred/Target Std Ratio: {comp['std_ratio']:.4f} "
+                                f"(Target: match 1.0 for full variance)"
+                            )
+                        if 'mse' in comp and 'direction' in comp:
+                            logger.info(
+                                f"  Loss Components - MSE: {comp['mse']:.6f}, "
+                                f"Direction: {comp['direction']:.6f}, "
+                                f"Variance: {comp.get('variance', 0):.6f}"
+                            )
 
                 # Early stopping based on validation loss
                 if val_loss < best_val_loss - min_delta:
