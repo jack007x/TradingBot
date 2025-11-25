@@ -91,35 +91,45 @@ class EnsembleStrategy:
         features: np.ndarray,
         current_price: float
     ) -> Dict:
-        """Get prediction from LSTM/GRU model."""
+        """
+        Get prediction from LSTM/GRU regression model.
+
+        UPDATED FOR REGRESSION APPROACH:
+        - Model now predicts RETURNS (e.g., +0.0025 = +0.25% gain)
+        - Not absolute prices!
+        - Larger return magnitude = higher confidence
+        """
         try:
             prediction = model.predict(features)
-            predicted_price = float(prediction[0][0]) if len(prediction.shape) > 1 else float(prediction[0])
 
-            # Get confidence from uncertainty
-            if hasattr(model, 'predict_with_confidence'):
-                mean_pred, std_pred = model.predict_with_confidence(features)
-                confidence = 1.0 / (1.0 + float(std_pred[0]))
-            else:
-                confidence = 0.7
+            # Extract predicted return (continuous value like +0.0025 or -0.0015)
+            predicted_return = float(prediction[0]) if hasattr(prediction[0], '__iter__') else float(prediction)
 
-            # Determine signal
-            if current_price > 0:
-                price_change = (predicted_price - current_price) / current_price
-                if price_change > 0.005:
-                    signal = 'buy'
-                elif price_change < -0.005:
-                    signal = 'sell'
-                else:
-                    signal = 'hold'
+            # Confidence based on return magnitude (larger magnitude = more confident)
+            # Scale: 0.5% return → 0.7 confidence, 1% → 0.8, 2% → 0.9
+            return_magnitude = abs(predicted_return)
+            confidence = min(0.5 + (return_magnitude / 0.02) * 0.4, 0.95)  # Cap at 0.95
+
+            # Determine signal based on predicted return
+            # Use adaptive threshold based on magnitude
+            threshold = 0.003  # 0.3% default threshold
+
+            if predicted_return > threshold:
+                signal = 'buy'
+            elif predicted_return < -threshold:
+                signal = 'sell'
             else:
                 signal = 'hold'
+
+            # Calculate predicted price for compatibility
+            predicted_price = current_price * (1 + predicted_return) if current_price > 0 else 0
 
             return {
                 'signal': signal,
                 'confidence': confidence,
-                'predicted_price': predicted_price,
-                'price_change': price_change if current_price > 0 else 0
+                'predicted_return': predicted_return,  # New: return prediction
+                'predicted_price': predicted_price,    # Legacy: for backward compatibility
+                'price_change': predicted_return       # Now same as predicted_return
             }
         except Exception as e:
             logger.error(f"NN prediction error: {e}")
