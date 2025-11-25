@@ -395,12 +395,59 @@ class DataPreprocessor:
             'X_test': X_test, 'y_test': y_test
         }
 
+    def calculate_adaptive_threshold(
+        self,
+        df: pd.DataFrame,
+        atr_column: str = 'atr_14',
+        percentile: float = 50.0,
+        min_threshold: float = 0.0005,
+        max_threshold: float = 0.01
+    ) -> float:
+        """
+        Calculate adaptive threshold based on ATR (Average True Range).
+
+        Higher volatility (higher ATR) requires higher threshold to distinguish
+        meaningful moves from noise.
+
+        Args:
+            df: DataFrame with ATR column
+            atr_column: Name of ATR column
+            percentile: Percentile of ATR to use (50 = median)
+            min_threshold: Minimum threshold (0.05%)
+            max_threshold: Maximum threshold (1%)
+
+        Returns:
+            Adaptive threshold as percentage
+        """
+        if atr_column not in df.columns:
+            logger.warning(f"ATR column '{atr_column}' not found, using default threshold")
+            return 0.002
+
+        # Get ATR at specified percentile
+        atr_value = np.percentile(df[atr_column].dropna(), percentile)
+
+        # Get median close price
+        median_close = df['close'].median()
+
+        # Calculate threshold as ATR / close (as percentage)
+        # Use 30% of ATR as threshold (conservative)
+        threshold = (atr_value / median_close) * 0.3
+
+        # Clamp to min/max
+        threshold = max(min_threshold, min(max_threshold, threshold))
+
+        logger.info(f"Adaptive threshold calculated: {threshold:.6f} ({threshold*100:.4f}%)")
+        logger.info(f"Based on ATR={atr_value:.4f}, median_close={median_close:.2f}")
+
+        return threshold
+
     def create_direction_labels(
         self,
         df: pd.DataFrame,
         prediction_horizon: int = 1,
-        threshold: float = 0.0001,
-        target_col: str = 'close'
+        threshold: Optional[float] = None,
+        target_col: str = 'close',
+        adaptive: bool = True
     ) -> np.ndarray:
         """
         Create direction labels for classification.
@@ -414,11 +461,21 @@ class DataPreprocessor:
             df: DataFrame with price data
             prediction_horizon: How many steps ahead to predict
             threshold: Minimum change to consider as up/down (as percentage)
+                      If None and adaptive=True, will calculate from ATR
             target_col: Column name for target price
+            adaptive: Use adaptive threshold based on ATR
 
         Returns:
             Array of direction labels (0=down, 1=neutral, 2=up)
         """
+        # Calculate threshold adaptively if requested
+        if threshold is None and adaptive:
+            threshold = self.calculate_adaptive_threshold(df)
+        elif threshold is None:
+            threshold = 0.002  # Default 0.2%
+
+        logger.info(f"Using threshold: {threshold:.6f} ({threshold*100:.4f}%)")
+
         prices = df[target_col].values
         labels = []
 
@@ -442,8 +499,11 @@ class DataPreprocessor:
         # Log class distribution
         unique, counts = np.unique(labels, return_counts=True)
         dist = dict(zip(unique, counts))
-        logger.info(f"Direction label distribution: Down={dist.get(0, 0)}, "
-                   f"Neutral={dist.get(1, 0)}, Up={dist.get(2, 0)}")
+        total = len(labels)
+        logger.info(f"Direction label distribution:")
+        logger.info(f"  Down:    {dist.get(0, 0):5d} ({dist.get(0, 0)/total*100:5.1f}%)")
+        logger.info(f"  Neutral: {dist.get(1, 0):5d} ({dist.get(1, 0)/total*100:5.1f}%)")
+        logger.info(f"  Up:      {dist.get(2, 0):5d} ({dist.get(2, 0)/total*100:5.1f}%)")
 
         return labels
 
@@ -452,7 +512,8 @@ class DataPreprocessor:
         df: pd.DataFrame,
         sequence_length: int = 60,
         prediction_horizon: int = 1,
-        direction_threshold: float = 0.0002,
+        direction_threshold: Optional[float] = None,
+        adaptive_threshold: bool = True,
         target_col: str = 'close',
         feature_cols: Optional[List[str]] = None
     ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
@@ -464,6 +525,8 @@ class DataPreprocessor:
             sequence_length: Length of input sequences
             prediction_horizon: How many steps ahead to predict
             direction_threshold: Minimum change for up/down classification
+                                If None, will use adaptive threshold based on ATR
+            adaptive_threshold: Use adaptive threshold if direction_threshold is None
             target_col: Target column name
             feature_cols: Feature columns to use (None = all numeric)
 
@@ -480,13 +543,14 @@ class DataPreprocessor:
         # Convert to numpy
         data = df[feature_cols].values
 
-        # Create direction labels
-        full_df_for_labels = df[[target_col]].copy()
+        # Create direction labels with adaptive threshold
+        # Need full df for ATR calculation
         direction_labels = self.create_direction_labels(
-            full_df_for_labels,
+            df,
             prediction_horizon=prediction_horizon,
             threshold=direction_threshold,
-            target_col=target_col
+            target_col=target_col,
+            adaptive=adaptive_threshold
         )
 
         # Create sequences

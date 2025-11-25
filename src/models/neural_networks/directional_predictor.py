@@ -6,9 +6,68 @@ Optimized for trading with focus on accuracy and profitability.
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 from loguru import logger
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance.
+
+    FL(p_t) = -α(1 - p_t)^γ * log(p_t)
+
+    Args:
+        alpha: Balancing factor for each class (list or tensor)
+        gamma: Focusing parameter (default 2.0)
+        reduction: 'mean' or 'sum'
+    """
+
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: (N, C) logits
+            targets: (N,) class indices
+        """
+        # Get probabilities
+        probs = F.softmax(inputs, dim=1)
+
+        # Get probability of correct class
+        targets_one_hot = F.one_hot(targets, num_classes=inputs.size(1)).float()
+        probs_t = (probs * targets_one_hot).sum(dim=1)
+
+        # Calculate focal weight: (1 - p_t)^gamma
+        focal_weight = (1 - probs_t) ** self.gamma
+
+        # Calculate cross entropy
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+
+        # Apply focal weight
+        focal_loss = focal_weight * ce_loss
+
+        # Apply alpha weight if provided
+        if self.alpha is not None:
+            if isinstance(self.alpha, (list, np.ndarray)):
+                alpha = torch.FloatTensor(self.alpha).to(inputs.device)
+            else:
+                alpha = self.alpha
+
+            alpha_t = alpha[targets]
+            focal_loss = alpha_t * focal_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 class DirectionalLSTM(nn.Module):
@@ -239,7 +298,9 @@ class DirectionalPredictor:
         epochs: int = 100,
         batch_size: int = 64,
         early_stopping_patience: int = 20,
-        min_delta: float = 0.005
+        min_delta: float = 0.005,
+        use_smote: bool = True,
+        smote_k_neighbors: int = 3
     ) -> Dict[str, List[float]]:
         """
         Train the model.
@@ -253,22 +314,71 @@ class DirectionalPredictor:
             batch_size: Batch size (increased to 64)
             early_stopping_patience: Patience for early stopping
             min_delta: Minimum improvement for early stopping
+            use_smote: Apply SMOTE for class balancing
+            smote_k_neighbors: Number of neighbors for SMOTE
 
         Returns:
             Training history
         """
-        # Calculate class weights for imbalanced data
+        # Log original class distribution
         unique, counts = np.unique(y_train, return_counts=True)
         total_samples = len(y_train)
-        class_weights = torch.FloatTensor([
+
+        logger.info(f"Original class distribution: {dict(zip(unique, counts))}")
+        logger.info(f"Original class percentages: {[f'{c/total_samples*100:.1f}%' for c in counts]}")
+
+        # Apply SMOTE if requested and imbalance is severe
+        if use_smote:
+            try:
+                from imblearn.over_sampling import SMOTE
+
+                # Check if imbalance is severe (max/min ratio > 1.5)
+                imbalance_ratio = counts.max() / counts.min()
+
+                if imbalance_ratio > 1.5:
+                    logger.info(f"Class imbalance ratio: {imbalance_ratio:.2f}, applying SMOTE...")
+
+                    # Reshape for SMOTE (needs 2D)
+                    original_shape = X_train.shape
+                    X_train_flat = X_train.reshape(X_train.shape[0], -1)
+
+                    # Apply SMOTE with limited neighbors to avoid overfitting
+                    smote = SMOTE(
+                        sampling_strategy='not majority',  # Oversample minority classes
+                        k_neighbors=min(smote_k_neighbors, counts.min() - 1),
+                        random_state=42
+                    )
+                    X_train_flat, y_train = smote.fit_resample(X_train_flat, y_train)
+
+                    # Reshape back
+                    X_train = X_train_flat.reshape(-1, original_shape[1], original_shape[2])
+
+                    # Log new distribution
+                    unique_new, counts_new = np.unique(y_train, return_counts=True)
+                    total_new = len(y_train)
+                    logger.info(f"After SMOTE: {dict(zip(unique_new, counts_new))}")
+                    logger.info(f"After SMOTE percentages: {[f'{c/total_new*100:.1f}%' for c in counts_new]}")
+                else:
+                    logger.info(f"Class imbalance ratio: {imbalance_ratio:.2f}, SMOTE not needed")
+
+            except ImportError:
+                logger.warning("imblearn not installed, skipping SMOTE. Install with: pip install imbalanced-learn")
+            except Exception as e:
+                logger.warning(f"SMOTE failed: {e}, continuing without resampling")
+
+        # Calculate class weights for Focal Loss
+        unique, counts = np.unique(y_train, return_counts=True)
+        total_samples = len(y_train)
+        class_weights = [
             total_samples / (len(unique) * count) for count in counts
-        ]).to(self.device)
+        ]
 
-        logger.info(f"Class distribution: {dict(zip(unique, counts))}")
-        logger.info(f"Class weights: {class_weights.cpu().numpy()}")
+        logger.info(f"Final class weights: {class_weights}")
 
-        # Create loss function with class weights
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+        # Use Focal Loss to handle extreme class imbalance
+        # Gamma=2 focuses on hard examples, alpha weights balance classes
+        self.criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='mean')
+        logger.info("Using Focal Loss (gamma=2.0) for class imbalance handling")
 
         # Convert to tensors
         X_train_t = torch.FloatTensor(X_train).to(self.device)

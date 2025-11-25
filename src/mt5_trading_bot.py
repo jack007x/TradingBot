@@ -205,14 +205,14 @@ class MT5TradingBot:
         logger.info(f"Training data: {len(df)} bars with {len(df.columns)} features")
 
         # Prepare directional sequences for classification
-        # Use higher threshold to reduce neutral class
-        direction_threshold = 0.0008 if 'XAU' in symbol else 0.0004
-        logger.info(f"Using direction threshold: {direction_threshold}")
+        # Use adaptive threshold based on ATR to handle volatility
+        logger.info("Using adaptive threshold based on ATR for direction labeling")
         X, y, feature_names = self.preprocessor.prepare_directional_sequences(
             df,
             sequence_length=self.config.neural_network.lstm_sequence_length,
             prediction_horizon=1,
-            direction_threshold=direction_threshold,
+            direction_threshold=None,  # Use adaptive
+            adaptive_threshold=True,
             target_col='close'
         )
 
@@ -240,7 +240,9 @@ class MT5TradingBot:
             splits['X_val'], splits['y_val'],
             epochs=100,
             batch_size=64,  # Larger batch
-            early_stopping_patience=20  # More patience
+            early_stopping_patience=20,  # More patience
+            use_smote=True,  # Enable SMOTE for class balancing
+            smote_k_neighbors=3  # Conservative neighbors
         )
         results['lstm'] = self.lstm_model.evaluate(splits['X_test'], splits['y_test'])
         logger.info(f"LSTM Results: Accuracy={results['lstm']['accuracy']:.4f}, "
@@ -269,7 +271,9 @@ class MT5TradingBot:
             splits['X_val'], splits['y_val'],
             epochs=100,
             batch_size=64,  # Larger batch
-            early_stopping_patience=20  # More patience
+            early_stopping_patience=20,  # More patience
+            use_smote=True,  # Enable SMOTE for class balancing
+            smote_k_neighbors=3  # Conservative neighbors
         )
         results['gru'] = self.gru_model.evaluate(splits['X_test'], splits['y_test'])
         logger.info(f"GRU Results: Accuracy={results['gru']['accuracy']:.4f}, "
@@ -282,7 +286,7 @@ class MT5TradingBot:
 
         # Train DQL Agent with reduced features and window
         logger.info("Training DQL agent with compact state...")
-        from ..utils.feature_selector import SimpleFeatureSelector
+        from src.utils.feature_selector import SimpleFeatureSelector
 
         # Select only essential features for RL (10-15 features)
         df_rl, rl_features = SimpleFeatureSelector.select_features(df)
