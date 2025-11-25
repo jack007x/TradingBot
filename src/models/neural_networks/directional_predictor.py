@@ -327,6 +327,13 @@ class DirectionalPredictor:
         logger.info(f"Original class distribution: {dict(zip(unique, counts))}")
         logger.info(f"Original class percentages: {[f'{c/total_samples*100:.1f}%' for c in counts]}")
 
+        # CRITICAL FIX: Calculate class weights BEFORE SMOTE
+        # Focal Loss needs original imbalance ratios, not post-SMOTE balanced counts
+        original_class_weights = [
+            total_samples / (len(unique) * count) for count in counts
+        ]
+        logger.info(f"Original class weights (for Focal Loss): {[f'{w:.3f}' for w in original_class_weights]}")
+
         # Apply SMOTE if requested and imbalance is severe
         if use_smote:
             try:
@@ -366,31 +373,39 @@ class DirectionalPredictor:
             except Exception as e:
                 logger.warning(f"SMOTE failed: {e}, continuing without resampling")
 
-        # Calculate class weights for Focal Loss
-        unique, counts = np.unique(y_train, return_counts=True)
-        total_samples = len(y_train)
-        class_weights = [
-            total_samples / (len(unique) * count) for count in counts
-        ]
-
-        logger.info(f"Final class weights: {class_weights}")
-
-        # Use Focal Loss to handle extreme class imbalance
-        # Gamma=2 focuses on hard examples, alpha weights balance classes
-        self.criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='mean')
-        logger.info("Using Focal Loss (gamma=2.0) for class imbalance handling")
+        # Use Focal Loss with ORIGINAL class weights (before SMOTE)
+        # This ensures minority classes get proper attention even after resampling
+        self.criterion = FocalLoss(alpha=original_class_weights, gamma=2.0, reduction='mean')
+        logger.info("Using Focal Loss (gamma=2.0) with original class weights for imbalance handling")
 
         # Convert to tensors
         X_train_t = torch.FloatTensor(X_train).to(self.device)
         y_train_t = torch.LongTensor(y_train).to(self.device)
 
         train_dataset = torch.utils.data.TensorDataset(X_train_t, y_train_t)
+
+        # CRITICAL FIX: Use WeightedRandomSampler for balanced batches
+        # Calculate sample weights (inverse of class frequency)
+        unique_after_smote, counts_after_smote = np.unique(y_train, return_counts=True)
+        class_sample_counts = np.array([counts_after_smote[np.where(unique_after_smote == t)[0][0]]
+                                        for t in y_train])
+        sample_weights = 1.0 / class_sample_counts
+        sample_weights = torch.DoubleTensor(sample_weights)
+
+        # Create weighted sampler for balanced batches
+        weighted_sampler = torch.utils.data.WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            sampler=weighted_sampler,  # Use weighted sampler instead of shuffle
             drop_last=True  # Drop last incomplete batch
         )
+        logger.info("Using WeightedRandomSampler for balanced batch composition")
 
         # Update scheduler steps_per_epoch
         if hasattr(self.scheduler, 'total_steps'):
@@ -428,6 +443,9 @@ class DirectionalPredictor:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
+
+                # CRITICAL FIX: OneCycleLR must step after every batch, not epoch
+                self.scheduler.step()
 
                 train_losses.append(loss.item())
 
@@ -475,16 +493,35 @@ class DirectionalPredictor:
                 self.history['val_acc'].append(val_acc)
                 self.history['val_balanced_acc'].append(val_balanced_acc)
 
-                # Learning rate scheduler
-                self.scheduler.step(val_balanced_acc)
+                # OneCycleLR is stepped after each batch (above), not here
+                # Removed: self.scheduler.step(val_balanced_acc) - WRONG for OneCycleLR
 
-                # Logging
+                # Enhanced logging with per-class metrics
                 if (epoch + 1) % 5 == 0:
+                    # Calculate per-class accuracies
+                    train_class_acc = train_class_correct / (train_class_total + 1e-8)
+                    val_class_acc = val_class_correct / (val_class_total + 1e-8)
+
                     logger.info(
                         f"Epoch {epoch + 1}/{epochs} - "
                         f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} ({train_balanced_acc:.4f}) - "
                         f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f} ({val_balanced_acc:.4f})"
                     )
+                    logger.info(
+                        f"  Per-Class Train Acc: "
+                        f"Down={train_class_acc[0]:.3f}, Neutral={train_class_acc[1]:.3f}, Up={train_class_acc[2]:.3f}"
+                    )
+                    logger.info(
+                        f"  Per-Class Val Acc:   "
+                        f"Down={val_class_acc[0]:.3f}, Neutral={val_class_acc[1]:.3f}, Up={val_class_acc[2]:.3f}"
+                    )
+
+                    # Warning if any class accuracy is 0 (single-class prediction)
+                    if np.any(val_class_acc < 0.01):
+                        logger.warning(
+                            f"⚠️  MODEL COLLAPSE WARNING: Some classes have <1% accuracy! "
+                            f"Model might be predicting only one class."
+                        )
 
                 # Early stopping based on balanced accuracy
                 if val_balanced_acc > best_val_acc + min_delta:

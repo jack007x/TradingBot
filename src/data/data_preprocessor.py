@@ -355,10 +355,11 @@ class DataPreprocessor:
         y: np.ndarray,
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
-        shuffle: bool = False
+        shuffle: bool = False,
+        stratify: bool = True
     ) -> Dict[str, np.ndarray]:
         """
-        Split data into train, validation, and test sets.
+        Split data into train, validation, and test sets with stratification.
 
         Args:
             X: Features
@@ -366,28 +367,48 @@ class DataPreprocessor:
             train_ratio: Proportion for training
             val_ratio: Proportion for validation
             shuffle: Whether to shuffle data
+            stratify: Use stratified split to preserve class distribution (CRITICAL for imbalanced data)
 
         Returns:
             Dictionary with train/val/test splits
         """
         test_ratio = 1 - train_ratio - val_ratio
 
+        # CRITICAL FIX: Use stratified split to maintain class distribution
+        stratify_param = y if stratify else None
+
         # First split: train and temp (val + test)
         X_train, X_temp, y_train, y_temp = train_test_split(
             X, y,
             test_size=(val_ratio + test_ratio),
-            shuffle=shuffle
+            shuffle=shuffle,
+            stratify=stratify_param,
+            random_state=42 if stratify else None
         )
 
-        # Second split: val and test
+        # Second split: val and test (also stratified)
         val_ratio_adjusted = val_ratio / (val_ratio + test_ratio)
+        stratify_temp = y_temp if stratify else None
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp,
             test_size=(1 - val_ratio_adjusted),
-            shuffle=shuffle
+            shuffle=shuffle,
+            stratify=stratify_temp,
+            random_state=42 if stratify else None
         )
 
         logger.info(f"Split data: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
+
+        if stratify:
+            # Log class distributions to verify stratification
+            unique_train, counts_train = np.unique(y_train, return_counts=True)
+            unique_val, counts_val = np.unique(y_val, return_counts=True)
+            unique_test, counts_test = np.unique(y_test, return_counts=True)
+
+            logger.info("Stratified class distributions:")
+            logger.info(f"  Train: {dict(zip(unique_train, counts_train))}")
+            logger.info(f"  Val:   {dict(zip(unique_val, counts_val))}")
+            logger.info(f"  Test:  {dict(zip(unique_test, counts_test))}")
 
         return {
             'X_train': X_train, 'y_train': y_train,
@@ -430,14 +451,16 @@ class DataPreprocessor:
         median_close = df['close'].median()
 
         # Calculate threshold as ATR / close (as percentage)
-        # Use 30% of ATR as threshold (conservative)
-        threshold = (atr_value / median_close) * 0.3
+        # CRITICAL FIX: Use 70% of ATR (was 30% - too conservative)
+        # 70% gives more meaningful price moves while filtering noise
+        threshold = (atr_value / median_close) * 0.7
 
         # Clamp to min/max
         threshold = max(min_threshold, min(max_threshold, threshold))
 
         logger.info(f"Adaptive threshold calculated: {threshold:.6f} ({threshold*100:.4f}%)")
         logger.info(f"Based on ATR={atr_value:.4f}, median_close={median_close:.2f}")
+        logger.info(f"Using 70% of ATR (increased from 30%) for meaningful price moves")
 
         return threshold
 

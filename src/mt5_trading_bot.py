@@ -219,8 +219,8 @@ class MT5TradingBot:
         self.feature_columns = feature_names
         input_size = len(feature_names)
 
-        # Split data
-        splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15)
+        # Split data with stratification to preserve class distribution
+        splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15, stratify=True)
 
         # Train Directional LSTM with improved hyperparameters
         logger.info("Training Directional LSTM model...")

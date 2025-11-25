@@ -183,12 +183,13 @@ class TradingEnvironment(gym.Env):
         # 3. Risk penalty (discourage over-leveraging)
         risk_penalty = 0.0
         if abs(self.position) > 0:
-            # Penalty proportional to position size relative to balance
+            # CRITICAL FIX: Use abs() for unrealized_pnl to ensure penalty is always positive
             risk_penalty = 0.01 * (abs(self.position) * abs(self._get_unrealized_pnl())) / self.initial_balance
 
         # Final reward
         reward = (equity_change / self.initial_balance) * 1000  # Scale to reasonable range
-        reward -= fee_penalty * 10  # Penalize fees
+        # CRITICAL FIX: Reduce fee penalty multiplier from 10 to 2 (was discouraging ALL trading)
+        reward -= fee_penalty * 2  # Moderate fee penalty
         reward -= risk_penalty  # Penalize risk
 
         # Update max equity
