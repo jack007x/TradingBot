@@ -597,6 +597,137 @@ class DataPreprocessor:
 
         return X, y, feature_cols
 
+    def create_regression_labels(
+        self,
+        df: pd.DataFrame,
+        horizons: List[int] = [1, 4, 12, 24],
+        target_col: str = 'close'
+    ) -> pd.DataFrame:
+        """
+        Create CONTINUOUS return labels for regression (NOT classification).
+
+        WHY THIS IS BETTER:
+        - NO class imbalance issues
+        - NO threshold dependency
+        - Captures magnitude of moves (0.5% vs 2% distinction)
+        - Natural probability distribution
+        - More information per label
+
+        Args:
+            df: DataFrame with price data
+            horizons: List of forward-looking periods (e.g., [1, 4, 12, 24] for 1h, 4h, 12h, 24h)
+            target_col: Price column to use
+
+        Returns:
+            DataFrame with continuous return labels added
+        """
+        df = df.copy()
+
+        # Create forward returns for multiple horizons
+        for h in horizons:
+            # Forward percentage return
+            df[f'target_return_{h}h'] = df[target_col].pct_change(h).shift(-h)
+
+        # Primary target (typically mid-horizon, e.g., 4h)
+        primary_horizon = horizons[1] if len(horizons) > 1 else horizons[0]
+        df['target_return'] = df[f'target_return_{primary_horizon}h']
+
+        # Log statistics
+        logger.info(f"Created regression labels for horizons: {horizons}")
+        for h in horizons:
+            col = f'target_return_{h}h'
+            returns = df[col].dropna()
+            logger.info(f"  {h}h returns: Mean={returns.mean():.6f}, Std={returns.std():.6f}, "
+                       f"Min={returns.min():.6f}, Max={returns.max():.6f}")
+
+        # Log distribution info (continuous, not discrete!)
+        logger.info(f"Primary target (target_return): {primary_horizon}h forward return")
+        logger.info(f"  Positive returns: {(df['target_return'] > 0).sum()} "
+                   f"({(df['target_return'] > 0).sum() / len(df) * 100:.1f}%)")
+        logger.info(f"  Negative returns: {(df['target_return'] < 0).sum()} "
+                   f"({(df['target_return'] < 0).sum() / len(df) * 100:.1f}%)")
+        logger.info(f"  Near-zero returns: {(df['target_return'].abs() < 0.001).sum()} "
+                   f"({(df['target_return'].abs() < 0.001).sum() / len(df) * 100:.1f}%)")
+
+        return df
+
+    def prepare_regression_sequences(
+        self,
+        df: pd.DataFrame,
+        sequence_length: int = 60,
+        target_col: str = 'target_return',
+        feature_cols: Optional[List[str]] = None
+    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """
+        Prepare sequences with CONTINUOUS return labels for regression.
+
+        KEY DIFFERENCES from directional sequences:
+        - Labels are continuous floats (not 0/1/2 classes)
+        - NO threshold-based binning
+        - NO class imbalance
+        - NO need for SMOTE or balancing
+
+        Args:
+            df: DataFrame with features and regression labels
+            sequence_length: Length of input sequences
+            target_col: Target return column (continuous)
+            feature_cols: Feature columns to use (None = all numeric except targets)
+
+        Returns:
+            Tuple of (X sequences, y continuous returns, feature column names)
+        """
+        # Select features (exclude target columns)
+        if feature_cols is None:
+            # Get all numeric columns
+            feature_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+            # Remove all target columns
+            target_columns = [col for col in feature_cols if 'target_return' in col]
+            for col in target_columns:
+                if col in feature_cols:
+                    feature_cols.remove(col)
+
+            logger.info(f"Auto-selected {len(feature_cols)} feature columns")
+
+        # Check target column exists
+        if target_col not in df.columns:
+            raise ValueError(f"Target column '{target_col}' not found in DataFrame")
+
+        # Convert to numpy
+        data = df[feature_cols].values
+        targets = df[target_col].values
+
+        # Create sequences
+        X = []
+        y = []
+
+        for i in range(sequence_length, len(data)):
+            # Sequence: [i-sequence_length:i] (bars 0 to i-1)
+            # Label: targets[i] (forward return from bar i)
+            if not np.isnan(targets[i]):  # Skip NaN targets
+                X.append(data[i - sequence_length:i])
+                y.append(targets[i])
+
+        X = np.array(X)
+        y = np.array(y)
+
+        logger.info(f"Created {len(X)} regression sequences of shape {X.shape[1:]}")
+        logger.info(f"Target statistics:")
+        logger.info(f"  Mean: {y.mean():.6f}")
+        logger.info(f"  Std:  {y.std():.6f}")
+        logger.info(f"  Min:  {y.min():.6f}")
+        logger.info(f"  Max:  {y.max():.6f}")
+        logger.info(f"  Median: {np.median(y):.6f}")
+
+        # Check for extreme outliers (might want to clip)
+        outlier_threshold = 3 * y.std()
+        outliers = np.abs(y) > outlier_threshold
+        if outliers.sum() > 0:
+            logger.warning(f"Found {outliers.sum()} outliers (>{outlier_threshold:.4f})")
+            logger.warning(f"Consider clipping extreme values")
+
+        return X, y, feature_cols
+
     def create_chart_images(
         self,
         df: pd.DataFrame,
