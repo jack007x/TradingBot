@@ -405,6 +405,14 @@ class MT5TradingBot:
         self._setup_ensemble(results)
         self.models_trained = True
 
+        # Save metrics cache for later ensemble reconstruction
+        metrics_file = Path('saved_models') / 'model_metrics.json'
+        metrics_file.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        with open(metrics_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"✅ Metrics cached to {metrics_file}")
+
         logger.info("=" * 70)
         logger.info("✅ ALL MODELS TRAINED SUCCESSFULLY")
         logger.info("=" * 70)
@@ -811,14 +819,67 @@ class MT5TradingBot:
         logger.info(f"States saved to {save_dir}")
 
     def load_state(self, directory: str = 'saved_models') -> None:
-        """Load all model states."""
+        """Load all model states from saved checkpoints."""
         load_dir = Path(directory)
 
+        # Load LSTM model (RegressionPredictor with attention_lstm)
         if (load_dir / 'lstm_model.pt').exists():
-            self.lstm_model = LSTMPredictor.from_checkpoint(load_dir / 'lstm_model.pt')
+            logger.info(f"Loading AttentionLSTM from {load_dir / 'lstm_model.pt'}")
+            self.lstm_model = RegressionPredictor.from_checkpoint(
+                load_dir / 'lstm_model.pt'
+            )
+            logger.info("✅ AttentionLSTM loaded")
+
+        # Load GRU model (RegressionPredictor with gru)
+        if (load_dir / 'gru_model.pt').exists():
+            logger.info(f"Loading GRU from {load_dir / 'gru_model.pt'}")
+            self.gru_model = RegressionPredictor.from_checkpoint(
+                load_dir / 'gru_model.pt'
+            )
+            logger.info("✅ GRU loaded")
+
+        # Load DQL agent (if exists)
+        if (load_dir / 'dql_agent.pt').exists():
+            logger.info(f"Loading DQL from {load_dir / 'dql_agent.pt'}")
+            # DQL loading handled elsewhere
+            logger.info("✅ DQL found")
+
+        # Load learning state
         if (load_dir / 'learning_state.json').exists():
             self.self_learning_engine.load(load_dir / 'learning_state.json')
+            logger.info("✅ Learning state loaded")
 
-        self._setup_ensemble()
+        # Setup ensemble (needs metrics - will use defaults if not available)
+        logger.info("Setting up ensemble...")
+        # Load cached metrics if available
+        metrics_file = load_dir / 'model_metrics.json'
+        if metrics_file.exists():
+            import json
+            with open(metrics_file, 'r') as f:
+                results = json.load(f)
+            logger.info("✅ Loaded cached metrics")
+            self._setup_ensemble(results)
+        else:
+            logger.warning("⚠️  No cached metrics - creating dummy metrics")
+            # Create minimal dummy metrics to setup ensemble
+            dummy_results = {}
+            if hasattr(self, 'lstm_model'):
+                dummy_results['lstm'] = {
+                    'directional_accuracy': 0.52,
+                    'correlation': 0.05
+                }
+            if hasattr(self, 'gru_model'):
+                dummy_results['gru'] = {
+                    'directional_accuracy': 0.49,
+                    'correlation': 0.03
+                }
+            if hasattr(self, 'dql_agent'):
+                dummy_results['dql'] = {
+                    'mean_return': 0.5,
+                    'mean_win_rate': 0.51,
+                    'mean_sharpe': 0.6
+                }
+            self._setup_ensemble(dummy_results)
+
         self.models_trained = True
-        logger.info(f"States loaded from {load_dir}")
+        logger.info(f"✅ States loaded from {load_dir}")
