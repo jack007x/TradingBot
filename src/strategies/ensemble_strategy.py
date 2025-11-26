@@ -307,6 +307,88 @@ class PerformanceWeightedEnsemble:
         self.weights = self.calculate_dynamic_weights(new_metrics)
         logger.info("Weights updated successfully!")
 
+    def get_trading_signal(
+        self,
+        features: np.ndarray,
+        sentiment_data: Optional[Dict] = None,
+        current_price: float = 0.0
+    ) -> Dict:
+        """
+        Get trading signal from ensemble predictions.
+
+        Args:
+            features: Input features for prediction
+            sentiment_data: Optional sentiment data (not used currently)
+            current_price: Current market price
+
+        Returns:
+            Dict with:
+                - signal: 'buy', 'sell', or 'hold'
+                - confidence: Confidence score (0-1)
+                - prediction: Raw return prediction
+                - individual_predictions: Per-model predictions
+        """
+        # Get ensemble prediction
+        prediction, confidence = self.predict(features, return_confidence=True)
+
+        # Get individual model contributions for transparency
+        contributions = self.get_model_contributions(features)
+
+        # Convert prediction to signal
+        # Prediction is expected return (e.g., +0.025 = +2.5% gain)
+        signal_threshold = 0.0015  # 0.15% minimum expected return
+
+        if prediction > signal_threshold:
+            signal = 'buy'
+        elif prediction < -signal_threshold:
+            signal = 'sell'
+        else:
+            signal = 'hold'
+
+        # Adjust confidence based on prediction magnitude
+        # Stronger predictions = higher confidence
+        magnitude_confidence = min(abs(prediction) / 0.03, 1.0)  # Scale to 3% max
+        final_confidence = (confidence * 0.7) + (magnitude_confidence * 0.3)
+
+        # Log signal generation
+        logger.info(f"🎯 SIGNAL GENERATED:")
+        logger.info(f"   Signal: {signal.upper()}")
+        logger.info(f"   Prediction: {prediction:.4f} ({prediction*100:.2f}%)")
+        logger.info(f"   Confidence: {final_confidence:.2f}")
+        logger.info(f"   Threshold: ±{signal_threshold:.4f}")
+
+        # Format individual predictions
+        individual_predictions = {}
+        for name, contrib in contributions.items():
+            if not contrib.get('excluded', False):
+                pred = contrib['prediction']
+                # Convert to signal
+                if pred > signal_threshold:
+                    model_signal = 'buy'
+                elif pred < -signal_threshold:
+                    model_signal = 'sell'
+                else:
+                    model_signal = 'hold'
+
+                individual_predictions[name] = {
+                    'signal': model_signal,
+                    'prediction': pred,
+                    'weight': contrib['weight'],
+                    'contribution': contrib['contribution'],
+                    'confidence': min(abs(pred) / 0.03, 1.0)
+                }
+
+                logger.info(f"   {name:12}: {model_signal:4} | pred={pred:+.4f} | weight={contrib['weight']:.2f}")
+
+        return {
+            'signal': signal,
+            'confidence': final_confidence,
+            'prediction': prediction,
+            'individual_predictions': individual_predictions,
+            'ensemble_agreement': confidence,
+            'magnitude_confidence': magnitude_confidence
+        }
+
 
 # Backward compatibility alias
 EnsembleStrategy = PerformanceWeightedEnsemble

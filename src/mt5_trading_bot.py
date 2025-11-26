@@ -489,23 +489,30 @@ class MT5TradingBot:
             Trading signal with analysis
         """
         if not self.models_trained:
-            return {'signal': 'hold', 'reason': 'Models not trained'}
+            logger.warning(f"❌ Models not trained - returning HOLD")
+            return {'signal': 'hold', 'reason': 'Models not trained', 'confidence': 0.0}
 
         # Get features
+        logger.debug(f"Fetching features for {symbol}...")
         features = self.get_realtime_features(
             symbol,
             sequence_length=self.config.neural_network.lstm_sequence_length
         )
 
         if features is None:
-            return {'signal': 'hold', 'reason': 'Insufficient data'}
+            logger.warning(f"❌ Insufficient data for {symbol} - returning HOLD")
+            return {'signal': 'hold', 'reason': 'Insufficient data', 'confidence': 0.0}
+
+        logger.debug(f"✅ Features shape: {features.shape}")
 
         # Get current price
         ticker = self.mt5_data.get_ticker(symbol)
         if not ticker:
-            return {'signal': 'hold', 'reason': 'Cannot get price'}
+            logger.warning(f"❌ Cannot get price for {symbol} - returning HOLD")
+            return {'signal': 'hold', 'reason': 'Cannot get price', 'confidence': 0.0}
 
         current_price = ticker['last'] or ticker['bid']
+        logger.debug(f"Current price for {symbol}: {current_price}")
 
         # Get sentiment (if available)
         try:
@@ -515,11 +522,17 @@ class MT5TradingBot:
             sentiment_data = None
 
         # Get ensemble signal
-        signal = self.ensemble_strategy.get_trading_signal(
-            features=features,
-            sentiment_data=sentiment_data,
-            current_price=current_price
-        )
+        try:
+            logger.info(f"🔮 Getting ensemble prediction for {symbol}...")
+            signal = self.ensemble_strategy.get_trading_signal(
+                features=features,
+                sentiment_data=sentiment_data,
+                current_price=current_price
+            )
+            logger.info(f"✅ Ensemble prediction successful")
+        except Exception as e:
+            logger.error(f"❌ Error getting ensemble signal: {e}", exc_info=True)
+            return {'signal': 'hold', 'reason': f'Ensemble error: {str(e)}', 'confidence': 0.0}
 
         # Get self-learning recommendation
         predictions = signal.get('individual_predictions', {})
@@ -742,11 +755,23 @@ class MT5TradingBot:
 
                 for symbol in symbols:
                     # Get signal
+                    logger.info(f"📊 Fetching signal for {symbol}...")
                     signal = await self.get_trading_signal(symbol)
 
+                    # Log signal details
+                    logger.info(f"📈 Signal for {symbol}: {signal['signal'].upper()} | "
+                               f"Confidence: {signal.get('confidence', 0):.2f} | "
+                               f"Reason: {signal.get('reason', 'N/A')}")
+
                     # Execute trade if signal is strong
-                    if signal['signal'] != 'hold' and signal['confidence'] > 0.6:
-                        self.execute_trade(symbol, signal)
+                    if signal['signal'] != 'hold':
+                        if signal.get('confidence', 0) > 0.6:
+                            logger.info(f"✅ Confidence {signal['confidence']:.2f} > 0.6 threshold - EXECUTING TRADE")
+                            self.execute_trade(symbol, signal)
+                        else:
+                            logger.warning(f"⚠️  Confidence {signal.get('confidence', 0):.2f} <= 0.6 threshold - SKIPPING TRADE")
+                    else:
+                        logger.info(f"➡️  HOLD signal - no action")
 
                 # Monitor positions
                 self.monitor_positions()
