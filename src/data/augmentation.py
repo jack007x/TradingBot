@@ -47,7 +47,7 @@ class TimeSeriesAugmenter:
         self,
         magnitude_range: Tuple[float, float] = (0.98, 1.02),
         jitter_std: float = 0.001,
-        augment_ratio: float = 1.5
+        augment_ratio: float = 0.3  # 🔧 REDUCED from 1.5 to 0.3 (memory optimization)
     ):
         """
         Initialize time series augmenter.
@@ -55,69 +55,89 @@ class TimeSeriesAugmenter:
         Args:
             magnitude_range: Range for magnitude warping (min, max) multipliers
             jitter_std: Standard deviation for Gaussian noise
-            augment_ratio: How much to augment (1.5 = 50% more data)
+            augment_ratio: How much to augment (0.3 = 30% more data, 1.3x total)
         """
         self.magnitude_range = magnitude_range
         self.jitter_std = jitter_std
         self.augment_ratio = augment_ratio
 
-        logger.info(f"TimeSeriesAugmenter initialized:")
+        logger.info(f"TimeSeriesAugmenter initialized (memory-optimized):")
         logger.info(f"  - Magnitude range: {magnitude_range}")
         logger.info(f"  - Jitter std: {jitter_std}")
-        logger.info(f"  - Augmentation ratio: {augment_ratio}x")
+        logger.info(f"  - Augmentation ratio: {augment_ratio}x (reduced for memory efficiency)")
 
     def augment_batch(
         self,
         X: np.ndarray,
-        y: np.ndarray
+        y: np.ndarray,
+        batch_size: int = 1000
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Augment a batch of sequences.
+        Augment a batch of sequences with memory optimization.
 
         Args:
             X: Training sequences (n_samples, seq_len, n_features)
             y: Training labels (n_samples,)
+            batch_size: Process augmentation in batches to reduce memory
 
         Returns:
             Tuple of (augmented_X, augmented_y) with more samples
         """
+        # 🔧 MEMORY FIX 1: Convert to float32 (50% memory reduction)
+        X = X.astype(np.float32)
+        y = y.astype(np.float32)
+
         n_original = len(X)
         n_augment = int(n_original * self.augment_ratio)
 
-        logger.info(f"Augmenting {n_original} samples → {n_original + n_augment} total")
+        logger.info(f"Augmenting {n_original} samples → {n_original + n_augment} total (memory-optimized)")
+        logger.info(f"  - Using float32 for 50% memory reduction")
+        logger.info(f"  - Batch processing: {batch_size} samples at a time")
 
         # Start with original data
         augmented_X = [X]
         augmented_y = [y]
 
-        # Generate augmented samples
-        for i in range(n_augment):
-            # Randomly select samples to augment
-            indices = np.random.choice(n_original, size=max(1, n_original // 2), replace=False)
+        # 🔧 MEMORY FIX 2: Process in batches instead of all at once
+        for start_idx in range(0, n_augment, batch_size):
+            end_idx = min(start_idx + batch_size, n_augment)
+            batch_size_actual = end_idx - start_idx
+
+            # Randomly select samples to augment for this batch
+            indices = np.random.choice(n_original, size=batch_size_actual, replace=True)
+            X_batch = X[indices]
+            y_batch = y[indices]
 
             # Random augmentation type
             aug_type = np.random.choice(['magnitude', 'jitter', 'combined'])
 
             if aug_type == 'magnitude':
-                aug_X = self.magnitude_warping(X[indices])
+                aug_X = self.magnitude_warping(X_batch)
             elif aug_type == 'jitter':
-                aug_X = self.add_jitter(X[indices])
+                aug_X = self.add_jitter(X_batch)
             else:  # combined
                 aug_X = self.add_jitter(
-                    self.magnitude_warping(X[indices])
+                    self.magnitude_warping(X_batch)
                 )
 
             augmented_X.append(aug_X)
-            augmented_y.append(y[indices])
+            augmented_y.append(y_batch)
 
-        # Combine all data
-        final_X = np.vstack(augmented_X)
-        final_y = np.concatenate(augmented_y)
+            # 🔧 MEMORY FIX 3: Clean up batch memory immediately
+            del X_batch, y_batch, aug_X
+
+        # Combine all data and ensure float32
+        final_X = np.vstack(augmented_X).astype(np.float32)
+        final_y = np.concatenate(augmented_y).astype(np.float32)
+
+        # Clean up intermediate lists
+        del augmented_X, augmented_y
 
         logger.info(f"Augmentation complete: {final_X.shape[0]} total samples")
         logger.info(f"  - Original: {n_original}")
         logger.info(f"  - Augmented: {final_X.shape[0] - n_original}")
         logger.info(f"  - Increase: {(final_X.shape[0] / n_original - 1) * 100:.1f}%")
+        logger.info(f"  - Memory: Using float32 (~{final_X.nbytes / 1024**2:.1f} MiB)")
 
         return final_X, final_y
 

@@ -256,14 +256,14 @@ class MT5TradingBot:
         # Split data (NO stratification needed - continuous targets!)
         splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15, stratify=False)
 
-        # 🚀 NEW: Data Augmentation (2-3x effective training data!)
+        # 🚀 NEW: Data Augmentation (memory-optimized!)
         logger.info("=" * 70)
-        logger.info("🚀 APPLYING DATA AUGMENTATION")
+        logger.info("🚀 APPLYING DATA AUGMENTATION (Memory-Optimized)")
         logger.info("=" * 70)
         augmenter = TimeSeriesAugmenter(
             magnitude_range=(0.98, 1.02),  # ±2% magnitude variation
             jitter_std=0.001,               # Small noise
-            augment_ratio=1.5               # 1.5x more data
+            augment_ratio=0.3               # 🔧 REDUCED: 0.3x more data (1.3x total, memory-friendly)
         )
         X_train_aug, y_train_aug = augmenter.augment_batch(
             splits['X_train'], splits['y_train']
