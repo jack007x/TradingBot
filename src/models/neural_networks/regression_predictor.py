@@ -283,7 +283,9 @@ class RegressionPredictor:
         epochs: int = 100,
         batch_size: int = 64,
         early_stopping_patience: int = 20,
-        min_delta: float = 0.00001
+        min_delta: float = 0.00001,
+        min_epochs_before_check: int = 15,
+        negative_corr_streak_threshold: int = 5
     ) -> Dict[str, List[float]]:
         """
         Train the regression model.
@@ -304,6 +306,8 @@ class RegressionPredictor:
             batch_size: Batch size
             early_stopping_patience: Patience for early stopping
             min_delta: Minimum improvement for early stopping
+            min_epochs_before_check: Minimum epochs before checking negative correlation (default 15)
+            negative_corr_streak_threshold: Consecutive negative epochs before stopping (default 5)
 
         Returns:
             Training history
@@ -352,6 +356,12 @@ class RegressionPredictor:
         best_val_correlation = float('-inf')  # Track best correlation
         patience_counter = 0
         correlation_patience_counter = 0  # Separate patience for correlation
+        negative_corr_streak = 0  # Track consecutive negative correlation epochs
+
+        logger.info(f"Smart early stopping configured:")
+        logger.info(f"  - Minimum epochs before negative check: {min_epochs_before_check}")
+        logger.info(f"  - Negative correlation streak threshold: {negative_corr_streak_threshold}")
+        logger.info(f"  - Correlation-based patience: {early_stopping_patience}")
 
         for epoch in range(epochs):
             # Training
@@ -475,24 +485,66 @@ class RegressionPredictor:
                                 f"Variance: {comp.get('variance', 0):.6f}"
                             )
 
-                # 🚨 CRITICAL: Check for negative correlation (disaster indicator!)
-                if val_correlation < 0:
-                    logger.error(f"🚨 NEGATIVE CORRELATION DETECTED: {val_correlation:.4f}")
-                    logger.error(f"   Model is predicting OPPOSITE direction!")
-                    logger.error(f"   This indicates TradingLoss weights are still imbalanced")
-                    logger.error(f"   Stopping training immediately!")
-                    # Restore best model (if any)
-                    if hasattr(self, 'best_state'):
-                        logger.info(f"   Restoring best model (epoch {self.best_state['epoch']})")
-                        logger.info(f"   Best correlation: {self.best_state['val_correlation']:.4f}")
-                        self.model.load_state_dict(self.best_state['model'])
-                        self.optimizer.load_state_dict(self.best_state['optimizer'])
-                    break
+                # 🚨 SMART NEGATIVE CORRELATION DETECTION
+                # Only check after minimum epochs to give model time to learn
+                if epoch >= min_epochs_before_check:
+                    # Track negative correlation streak
+                    if val_correlation < -0.05:  # Significantly negative
+                        negative_corr_streak += 1
+                        logger.warning(
+                            f"⚠️  Negative correlation: {val_correlation:.4f} "
+                            f"(streak: {negative_corr_streak}/{negative_corr_streak_threshold})"
+                        )
+                    else:
+                        # Reset streak if correlation becomes positive
+                        if negative_corr_streak > 0:
+                            logger.info(
+                                f"✅ Correlation recovered to {val_correlation:.4f} "
+                                f"(streak reset from {negative_corr_streak})"
+                            )
+                        negative_corr_streak = 0
 
-                # Warning for low correlation
-                if val_correlation < 0.05:
+                    # Emergency stop: Severely negative correlation
+                    if val_correlation < -0.15:
+                        logger.error(f"🚨 SEVERE NEGATIVE CORRELATION: {val_correlation:.4f}")
+                        logger.error(f"   Model is strongly predicting OPPOSITE direction!")
+                        logger.error(f"   This indicates major training issues - stopping immediately!")
+                        # Restore best model (if any)
+                        if hasattr(self, 'best_state'):
+                            logger.info(f"   Restoring best model (epoch {self.best_state['epoch']+1})")
+                            logger.info(f"   Best correlation: {self.best_state['val_correlation']:.4f}")
+                            self.model.load_state_dict(self.best_state['model'])
+                            self.optimizer.load_state_dict(self.best_state['optimizer'])
+                        break
+
+                    # Stop if consistently negative (streak threshold reached)
+                    if negative_corr_streak >= negative_corr_streak_threshold:
+                        logger.error(
+                            f"🚨 PERSISTENT NEGATIVE CORRELATION: "
+                            f"{negative_corr_streak} consecutive epochs below -0.05"
+                        )
+                        logger.error(f"   Model consistently predicting opposite direction!")
+                        logger.error(f"   Current correlation: {val_correlation:.4f}")
+                        logger.error(f"   Stopping training to prevent further degradation")
+                        # Restore best model
+                        if hasattr(self, 'best_state'):
+                            logger.info(f"   Restoring best model (epoch {self.best_state['epoch']+1})")
+                            logger.info(f"   Best correlation: {self.best_state['val_correlation']:.4f}")
+                            self.model.load_state_dict(self.best_state['model'])
+                            self.optimizer.load_state_dict(self.best_state['optimizer'])
+                        break
+                else:
+                    # Still in minimum epochs window - just warn
+                    if val_correlation < 0:
+                        logger.info(
+                            f"ℹ️  Early epoch {epoch+1}/{min_epochs_before_check}: "
+                            f"Negative correlation {val_correlation:.4f} (allowing model to stabilize)"
+                        )
+
+                # Warning for low correlation (anytime)
+                if val_correlation < 0.05 and val_correlation >= 0:
                     logger.warning(f"⚠️  Low correlation: {val_correlation:.4f} (target: >0.08)")
-                    logger.warning(f"   Model may need different loss function or hyperparameters")
+                    logger.warning(f"   Model predictions weakly correlated with actual returns")
 
                 # Early stopping based on CORRELATION (primary metric for trading!)
                 # Correlation is more important than raw loss for trading performance
