@@ -606,26 +606,189 @@ class RegressionPredictor:
         return results
 
     def save(self, filepath: Union[str, Path]):
-        """Save model to file."""
+        """
+        Save model to file with version and config.
+
+        Includes version tracking for future compatibility.
+        """
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        torch.save({
+        # Save with version and full config
+        checkpoint = {
+            'version': '2.0',  # Version 2.0: Regression with TradingLoss
             'model_type': self.model_type,
             'input_size': self.input_size,
+            'loss_fn': self.loss_fn_name,
+            'config': {
+                'input_size': self.input_size,
+                'model_type': self.model_type,
+                'hidden_size': 128,  # From init
+                'num_layers': 2,
+                'dropout': 0.3,
+                'learning_rate': self.optimizer.param_groups[0]['lr'],
+                'loss_fn': self.loss_fn_name
+            },
             'model_state': self.model.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
-            'history': self.history
-        }, filepath)
+            'history': self.history,
+            'device': str(self.device)
+        }
 
-        logger.info(f"RegressionPredictor saved to {filepath}")
+        torch.save(checkpoint, filepath)
+        logger.info(f"RegressionPredictor v2.0 saved to {filepath}")
 
     def load(self, filepath: Union[str, Path]):
-        """Load model from file."""
+        """
+        Load model from file with backward compatibility.
+
+        Handles both:
+        - Old format (no version, no config)
+        - New format (with version and config)
+        """
         checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
 
-        self.model.load_state_dict(checkpoint['model_state'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        self.history = checkpoint['history']
+        # Check version for compatibility
+        version = checkpoint.get('version', '1.0')
+
+        if version == '1.0':
+            # Old format - no config, no version
+            logger.warning(f"Loading old format checkpoint (v1.0) from {filepath}")
+            logger.warning("Consider retraining model with new TradingLoss for better performance!")
+
+            # Load what we can from old format
+            if 'model_state' in checkpoint:
+                self.model.load_state_dict(checkpoint['model_state'])
+            elif 'model_state_dict' in checkpoint:
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                # Very old format - just weights
+                self.model.load_state_dict(checkpoint)
+
+            if 'optimizer_state' in checkpoint:
+                try:
+                    self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+                except Exception as e:
+                    logger.warning(f"Could not load optimizer state: {e}")
+
+            if 'history' in checkpoint:
+                self.history = checkpoint['history']
+
+        else:
+            # New format (v2.0+) - has config and version
+            logger.info(f"Loading checkpoint v{version} from {filepath}")
+
+            self.model.load_state_dict(checkpoint['model_state'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            self.history = checkpoint['history']
 
         logger.info(f"RegressionPredictor loaded from {filepath}")
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        filepath: Union[str, Path],
+        device: Optional[str] = None
+    ) -> 'RegressionPredictor':
+        """
+        Create new RegressionPredictor from saved checkpoint.
+
+        Handles backward compatibility with old model formats.
+
+        Args:
+            filepath: Path to saved checkpoint
+            device: Device to load model on
+
+        Returns:
+            Loaded RegressionPredictor instance
+        """
+        checkpoint = torch.load(filepath, map_location='cpu', weights_only=False)
+
+        version = checkpoint.get('version', '1.0')
+
+        if version == '1.0':
+            # Old format - infer config from checkpoint
+            logger.warning(f"Loading old format checkpoint (v1.0) from {filepath}")
+            logger.warning("⚠️  Old models may not have TradingLoss enabled!")
+            logger.warning("⚠️  Recommend deleting and retraining for better performance!")
+
+            model_type = checkpoint.get('model_type', 'lstm')
+            input_size = checkpoint.get('input_size', None)
+
+            # Try to infer input_size from model state
+            if input_size is None:
+                model_state = checkpoint.get('model_state', checkpoint.get('model_state_dict', checkpoint))
+                input_size = cls._infer_input_size_from_state(model_state, model_type)
+
+            # Create with default config (MSE loss!)
+            predictor = cls(
+                input_size=input_size,
+                model_type=model_type,
+                loss_fn='mse',  # Old models used MSE
+                device=device
+            )
+
+        else:
+            # New format (v2.0+) - has config
+            logger.info(f"Loading checkpoint v{version} from {filepath}")
+
+            config = checkpoint['config']
+            predictor = cls(
+                input_size=config['input_size'],
+                model_type=config['model_type'],
+                hidden_size=config.get('hidden_size', 128),
+                num_layers=config.get('num_layers', 2),
+                dropout=config.get('dropout', 0.3),
+                learning_rate=config.get('learning_rate', 1e-3),
+                loss_fn=config.get('loss_fn', 'mse'),
+                device=device
+            )
+
+        # Load model weights
+        model_state = checkpoint.get('model_state', checkpoint.get('model_state_dict'))
+        if model_state:
+            predictor.model.load_state_dict(model_state)
+
+        # Load optimizer state (if available)
+        if 'optimizer_state' in checkpoint:
+            try:
+                predictor.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            except Exception as e:
+                logger.warning(f"Could not load optimizer state: {e}")
+
+        # Load history (if available)
+        if 'history' in checkpoint:
+            predictor.history = checkpoint['history']
+
+        return predictor
+
+    @staticmethod
+    def _infer_input_size_from_state(state_dict: dict, model_type: str) -> int:
+        """
+        Infer input size from model state dict.
+
+        Args:
+            state_dict: Model state dictionary
+            model_type: 'lstm' or 'gru'
+
+        Returns:
+            Inferred input size
+        """
+        # Try to find input layer weights
+        if model_type == 'lstm':
+            weight_key = 'lstm.weight_ih_l0'
+        elif model_type == 'gru':
+            weight_key = 'gru.weight_ih_l0'
+        else:
+            weight_key = None
+
+        if weight_key and weight_key in state_dict:
+            weight = state_dict[weight_key]
+            # For LSTM/GRU: weight shape is (4*hidden_size or 3*hidden_size, input_size)
+            input_size = weight.shape[1]
+            logger.info(f"Inferred input_size={input_size} from state dict")
+            return input_size
+
+        # Fallback default
+        logger.warning("Could not infer input_size from state dict, using default=78")
+        return 78
