@@ -441,12 +441,8 @@ class MT5TradingBot:
             min_correlation=0.03  # Must have some predictive power
         )
 
-        # Also keep old ensemble for compatibility
-        self.ensemble_strategy = EnsembleStrategy(
-            models=models,
-            voting_method='weighted',
-            confidence_threshold=0.6
-        )
+        # Alias for backward compatibility (ensemble_strategy -> performance_ensemble)
+        self.ensemble_strategy = self.performance_ensemble
 
     def get_realtime_features(
         self,
