@@ -1,6 +1,5 @@
-"""Trading strategies module."""
+"""Ensemble strategies for model combination"""
 
-from .self_learning_engine import SelfLearningEngine
-from .ensemble_strategy import EnsembleStrategy
+from .ensemble_strategy import PerformanceWeightedEnsemble
 
-__all__ = ["SelfLearningEngine", "EnsembleStrategy"]
+__all__ = ['PerformanceWeightedEnsemble']

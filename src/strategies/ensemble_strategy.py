@@ -1,361 +1,312 @@
 """
-Ensemble Strategy combining multiple AI models.
+Performance-Weighted Ensemble Strategy
+
+PROBLEM WITH EQUAL WEIGHTING:
+- Not all models perform equally well
+- Poor models (dir_acc < 50%, low correlation) hurt ensemble
+- Equal weights waste good model predictions
+
+SOLUTION - DYNAMIC PERFORMANCE WEIGHTING:
+- Weight models by: (directional_accuracy - 0.5) × correlation × 1000
+- Exclude models below thresholds (dir_acc < 50%, corr < 0.03)
+- Heavily favor models that are BOTH accurate AND correlated
+- Auto-adjusts weights based on validation performance
+
+EXAMPLE WEIGHTING:
+Model A: 53% dir_acc, 0.18 corr → weight = (0.53-0.50) * 0.18 * 1000 = 5.4
+Model B: 50.5% dir_acc, 0.10 corr → weight = (0.505-0.50) * 0.10 * 1000 = 0.5
+Model C: 49% dir_acc, 0.05 corr → weight = 0 (excluded)
+
+Normalized: Model A: 91.5%, Model B: 8.5%, Model C: 0%
 """
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
 from loguru import logger
 
 
-class EnsembleStrategy:
+class PerformanceWeightedEnsemble:
     """
-    Ensemble strategy that combines predictions from multiple AI models
-    (LSTM, GRU, CNN, RL agents, NLP sentiment) for trading decisions.
+    Weight models based on their actual validation performance.
+
+    Models are weighted by:
+    - Directional accuracy (must be > 50%)
+    - Correlation with actual returns (must be > 0.03)
+    - Combined score = (dir_acc - 0.5) × correlation × 1000
+
+    This heavily weights models that are both accurate AND well-correlated.
     """
 
     def __init__(
         self,
         models: Dict[str, Any],
-        weights: Optional[Dict[str, float]] = None,
-        voting_method: str = 'weighted',
-        confidence_threshold: float = 0.6
+        metrics: Dict[str, Dict[str, float]],
+        min_dir_acc: float = 0.50,
+        min_correlation: float = 0.03
     ):
         """
-        Initialize ensemble strategy.
+        Initialize ensemble with performance-based weighting.
 
         Args:
-            models: Dictionary of model instances {name: model}
-            weights: Initial weights for each model
-            voting_method: 'weighted', 'majority', or 'unanimous'
-            confidence_threshold: Minimum confidence for action
+            models: Dictionary of model_name -> model_object
+            metrics: Dictionary of model_name -> {
+                'directional_accuracy': float,
+                'correlation': float,
+                ... other metrics ...
+            }
+            min_dir_acc: Minimum directional accuracy to include (default 50%)
+            min_correlation: Minimum correlation to include (default 0.03)
         """
         self.models = models
-        self.voting_method = voting_method
-        self.confidence_threshold = confidence_threshold
+        self.metrics = metrics
+        self.min_dir_acc = min_dir_acc
+        self.min_correlation = min_correlation
 
-        # Initialize equal weights if not provided
-        if weights:
-            self.weights = weights
-        else:
-            self.weights = {name: 1.0 / len(models) for name in models}
+        # Calculate dynamic weights based on performance
+        self.weights = self.calculate_dynamic_weights(metrics)
 
-        # Prediction history for performance tracking
-        self.prediction_history: List[Dict] = []
+        # Log ensemble configuration
+        self._log_ensemble_configuration()
 
-        logger.info(f"EnsembleStrategy initialized with {len(models)} models")
-
-    def get_predictions(
+    def calculate_dynamic_weights(
         self,
-        features: np.ndarray,
-        sentiment_data: Optional[Dict] = None,
-        current_price: float = 0.0
-    ) -> Dict[str, Dict]:
+        metrics: Dict[str, Dict[str, float]]
+    ) -> Dict[str, float]:
         """
-        Get predictions from all models.
+        Calculate weights from multiple performance metrics.
+
+        Scoring formula:
+        - edge = directional_accuracy - 0.50 (edge over random)
+        - score = edge × correlation × 1000
+        - Exclude if dir_acc < min_dir_acc OR correlation < min_correlation
 
         Args:
-            features: Feature array for prediction
-            sentiment_data: NLP sentiment data
-            current_price: Current market price
+            metrics: Performance metrics for each model
 
         Returns:
-            Dictionary of predictions from each model
+            Dictionary of normalized weights (sum to 1.0)
+        """
+        scores = {}
+
+        logger.info("=" * 70)
+        logger.info("CALCULATING ENSEMBLE WEIGHTS")
+        logger.info("=" * 70)
+
+        for name, m in metrics.items():
+            dir_acc = m.get('directional_accuracy', 0.5)
+            corr = m.get('correlation', 0)
+
+            # Check minimum thresholds
+            if dir_acc < self.min_dir_acc or corr < self.min_correlation:
+                scores[name] = 0.0
+                logger.warning(
+                    f"❌ {name:12} EXCLUDED: "
+                    f"dir_acc={dir_acc:.4f} (min {self.min_dir_acc:.2f}), "
+                    f"corr={corr:.4f} (min {self.min_correlation:.2f})"
+                )
+                continue
+
+            # Calculate score: (accuracy edge) × (correlation) × 1000
+            # This heavily weights models that are both accurate AND correlated
+            edge = dir_acc - 0.50  # Edge over random (50%)
+            score = edge * corr * 1000
+            scores[name] = max(0, score)
+
+            logger.info(
+                f"✅ {name:12} INCLUDED: "
+                f"dir_acc={dir_acc:.4f}, corr={corr:.4f}, "
+                f"edge={edge:.4f}, score={score:.3f}"
+            )
+
+        # Normalize to sum to 1.0
+        total = sum(scores.values())
+
+        if total == 0:
+            logger.warning("⚠️  NO MODELS MEET THRESHOLD! Using equal weights as fallback")
+            return {name: 1.0 / len(scores) for name in scores}
+
+        weights = {name: score / total for name, score in scores.items()}
+
+        logger.info("=" * 70)
+        logger.info("FINAL ENSEMBLE WEIGHTS:")
+        for name in sorted(weights.keys(), key=lambda x: weights[x], reverse=True):
+            weight = weights[name]
+            if weight > 0:
+                logger.info(f"  {name:12}: {weight*100:5.1f}%")
+            else:
+                logger.info(f"  {name:12}:   0.0% (excluded)")
+        logger.info("=" * 70)
+
+        return weights
+
+    def predict(
+        self,
+        X: np.ndarray,
+        return_confidence: bool = True
+    ) -> Tuple[float, float]:
+        """
+        Get weighted prediction from ensemble.
+
+        Args:
+            X: Input features (single sample or batch)
+            return_confidence: Whether to return confidence score
+
+        Returns:
+            Tuple of (prediction, confidence) if return_confidence=True
+            Otherwise just prediction
         """
         predictions = {}
 
+        # Get prediction from each model
         for name, model in self.models.items():
+            weight = self.weights.get(name, 0)
+
+            if weight == 0:
+                continue  # Skip excluded models
+
+            # Get prediction
             try:
-                if 'lstm' in name.lower() or 'gru' in name.lower():
-                    pred = self._get_nn_prediction(model, features, current_price)
-                elif 'cnn' in name.lower():
-                    pred = self._get_cnn_prediction(model, features)
-                elif 'ppo' in name.lower() or 'dql' in name.lower():
-                    pred = self._get_rl_prediction(model, features)
-                elif 'sentiment' in name.lower() or 'nlp' in name.lower():
-                    pred = self._get_sentiment_prediction(model, sentiment_data)
-                else:
-                    pred = {'signal': 'hold', 'confidence': 0.5}
-
-                predictions[name] = pred
-
+                pred = model.predict(X) if hasattr(model, 'predict') else model.predict_single(X)
+                predictions[name] = float(pred) if not isinstance(pred, float) else pred
             except Exception as e:
-                logger.error(f"Error getting prediction from {name}: {e}")
-                predictions[name] = {'signal': 'hold', 'confidence': 0.0, 'error': str(e)}
+                logger.warning(f"Error getting prediction from {name}: {e}")
+                continue
 
-        return predictions
+        if not predictions:
+            logger.error("No valid predictions from any model!")
+            return (0.0, 0.0) if return_confidence else 0.0
 
-    def _get_nn_prediction(
-        self,
-        model,
-        features: np.ndarray,
-        current_price: float
-    ) -> Dict:
-        """
-        Get prediction from LSTM/GRU regression model.
+        # Weighted average
+        final_pred = sum(
+            pred * self.weights[name]
+            for name, pred in predictions.items()
+        )
 
-        UPDATED FOR REGRESSION APPROACH:
-        - Model now predicts RETURNS (e.g., +0.0025 = +0.25% gain)
-        - Not absolute prices!
-        - Larger return magnitude = higher confidence
-        """
-        try:
-            prediction = model.predict(features)
-
-            # Extract predicted return (continuous value like +0.0025 or -0.0015)
-            predicted_return = float(prediction[0]) if hasattr(prediction[0], '__iter__') else float(prediction)
-
-            # Confidence based on return magnitude (larger magnitude = more confident)
-            # Scale: 0.5% return → 0.7 confidence, 1% → 0.8, 2% → 0.9
-            return_magnitude = abs(predicted_return)
-            confidence = min(0.5 + (return_magnitude / 0.02) * 0.4, 0.95)  # Cap at 0.95
-
-            # Determine signal based on predicted return
-            # Use adaptive threshold based on magnitude
-            threshold = 0.003  # 0.3% default threshold
-
-            if predicted_return > threshold:
-                signal = 'buy'
-            elif predicted_return < -threshold:
-                signal = 'sell'
-            else:
-                signal = 'hold'
-
-            # Calculate predicted price for compatibility
-            predicted_price = current_price * (1 + predicted_return) if current_price > 0 else 0
-
-            return {
-                'signal': signal,
-                'confidence': confidence,
-                'predicted_return': predicted_return,  # New: return prediction
-                'predicted_price': predicted_price,    # Legacy: for backward compatibility
-                'price_change': predicted_return       # Now same as predicted_return
-            }
-        except Exception as e:
-            logger.error(f"NN prediction error: {e}")
-            return {'signal': 'hold', 'confidence': 0.0}
-
-    def _get_cnn_prediction(self, model, features: np.ndarray) -> Dict:
-        """Get prediction from CNN model."""
-        try:
-            predictions = model.predict(features)
-
-            if len(predictions.shape) > 1:
-                # Classification output
-                class_idx = np.argmax(predictions[0])
-                confidence = float(predictions[0][class_idx])
-
-                if class_idx == 1:  # Bullish
-                    signal = 'buy'
-                elif class_idx == 0:  # Bearish
-                    signal = 'sell'
-                else:
-                    signal = 'hold'
-            else:
-                signal = 'hold'
-                confidence = 0.5
-
-            return {
-                'signal': signal,
-                'confidence': confidence,
-                'probabilities': predictions[0].tolist() if len(predictions.shape) > 1 else []
-            }
-        except Exception as e:
-            logger.error(f"CNN prediction error: {e}")
-            return {'signal': 'hold', 'confidence': 0.0}
-
-    def _get_rl_prediction(self, model, features: np.ndarray) -> Dict:
-        """Get prediction from RL agent."""
-        try:
-            action, confidence = model.predict(features, deterministic=True)
-
-            # Map action to signal
-            action_map = {0: 'hold', 1: 'buy', 2: 'sell'}
-            signal = action_map.get(action, 'hold')
-
-            return {
-                'signal': signal,
-                'confidence': confidence,
-                'action': int(action)
-            }
-        except Exception as e:
-            logger.error(f"RL prediction error: {e}")
-            return {'signal': 'hold', 'confidence': 0.0}
-
-    def _get_sentiment_prediction(
-        self,
-        model,
-        sentiment_data: Optional[Dict]
-    ) -> Dict:
-        """Get prediction from sentiment analyzer."""
-        if sentiment_data is None:
-            return {'signal': 'hold', 'confidence': 0.0}
-
-        try:
-            sentiment = sentiment_data.get('sentiment', 'neutral')
-            score = sentiment_data.get('score', 0.0)
-            confidence = sentiment_data.get('confidence', 0.5)
-
-            if sentiment == 'bullish' or score > 0.2:
-                signal = 'buy'
-            elif sentiment == 'bearish' or score < -0.2:
-                signal = 'sell'
-            else:
-                signal = 'hold'
-
-            return {
-                'signal': signal,
-                'confidence': confidence,
-                'sentiment': sentiment,
-                'score': score
-            }
-        except Exception as e:
-            logger.error(f"Sentiment prediction error: {e}")
-            return {'signal': 'hold', 'confidence': 0.0}
-
-    def combine_predictions(
-        self,
-        predictions: Dict[str, Dict]
-    ) -> Dict:
-        """
-        Combine predictions using the configured voting method.
-
-        Args:
-            predictions: Dictionary of model predictions
-
-        Returns:
-            Combined prediction
-        """
-        if self.voting_method == 'weighted':
-            return self._weighted_voting(predictions)
-        elif self.voting_method == 'majority':
-            return self._majority_voting(predictions)
-        elif self.voting_method == 'unanimous':
-            return self._unanimous_voting(predictions)
+        if return_confidence:
+            # Calculate ensemble confidence
+            confidence = self.calculate_confidence(predictions)
+            return final_pred, confidence
         else:
-            return self._weighted_voting(predictions)
+            return final_pred
 
-    def _weighted_voting(self, predictions: Dict[str, Dict]) -> Dict:
-        """Weighted voting combination."""
-        scores = {'buy': 0.0, 'sell': 0.0, 'hold': 0.0}
-
-        for name, pred in predictions.items():
-            weight = self.weights.get(name, 0.0)
-            signal = pred.get('signal', 'hold')
-            confidence = pred.get('confidence', 0.5)
-
-            scores[signal] += weight * confidence
-
-        # Normalize
-        total = sum(scores.values())
-        if total > 0:
-            scores = {k: v / total for k, v in scores.items()}
-
-        best_signal = max(scores, key=scores.get)
-        best_confidence = scores[best_signal]
-
-        return {
-            'signal': best_signal,
-            'confidence': best_confidence,
-            'scores': scores,
-            'method': 'weighted'
-        }
-
-    def _majority_voting(self, predictions: Dict[str, Dict]) -> Dict:
-        """Simple majority voting."""
-        votes = {'buy': 0, 'sell': 0, 'hold': 0}
-
-        for pred in predictions.values():
-            signal = pred.get('signal', 'hold')
-            votes[signal] += 1
-
-        best_signal = max(votes, key=votes.get)
-        best_count = votes[best_signal]
-        total = len(predictions)
-
-        return {
-            'signal': best_signal,
-            'confidence': best_count / total if total > 0 else 0,
-            'votes': votes,
-            'method': 'majority'
-        }
-
-    def _unanimous_voting(self, predictions: Dict[str, Dict]) -> Dict:
-        """Unanimous voting - all models must agree."""
-        signals = [p.get('signal', 'hold') for p in predictions.values()]
-
-        if len(set(signals)) == 1:
-            signal = signals[0]
-            avg_confidence = np.mean([p.get('confidence', 0.5) for p in predictions.values()])
-            return {
-                'signal': signal,
-                'confidence': avg_confidence,
-                'unanimous': True,
-                'method': 'unanimous'
-            }
-
-        return {
-            'signal': 'hold',
-            'confidence': 0.0,
-            'unanimous': False,
-            'method': 'unanimous',
-            'reason': 'Models disagreed'
-        }
-
-    def get_trading_signal(
+    def calculate_confidence(
         self,
-        features: np.ndarray,
-        sentiment_data: Optional[Dict] = None,
-        current_price: float = 0.0
-    ) -> Dict:
+        predictions: Dict[str, float]
+    ) -> float:
         """
-        Get final trading signal.
+        Calculate ensemble confidence based on model agreement.
+
+        High confidence = models agree (low std deviation)
+        Low confidence = models disagree (high std deviation)
 
         Args:
-            features: Feature array
-            sentiment_data: Sentiment analysis data
-            current_price: Current price
+            predictions: Dictionary of model_name -> prediction
 
         Returns:
-            Trading signal with confidence and details
+            Confidence score between 0 and 1
         """
-        # Get individual predictions
-        predictions = self.get_predictions(features, sentiment_data, current_price)
+        if len(predictions) < 2:
+            return 0.5  # Neutral confidence if only one model
 
-        # Combine predictions
-        combined = self.combine_predictions(predictions)
+        preds = list(predictions.values())
 
-        # Apply confidence threshold
-        if combined['confidence'] < self.confidence_threshold:
-            combined['signal'] = 'hold'
-            combined['reason'] = f"Below confidence threshold ({self.confidence_threshold})"
+        # Calculate disagreement
+        std = np.std(preds)
+        mean_abs = np.mean(np.abs(preds))
 
-        # Add timestamp
-        combined['timestamp'] = datetime.utcnow().isoformat()
-        combined['individual_predictions'] = predictions
+        if mean_abs == 0:
+            return 0.0  # No signal
 
-        # Store in history
-        self.prediction_history.append(combined)
+        # Disagreement ratio
+        disagreement = std / (mean_abs + 1e-8)
 
-        return combined
+        # Confidence = 1 - disagreement (capped at 0)
+        confidence = max(0, min(1, 1 - disagreement))
 
-    def update_weights(self, new_weights: Dict[str, float]) -> None:
-        """Update model weights."""
-        self.weights.update(new_weights)
-        logger.info(f"Weights updated: {self.weights}")
+        return confidence
 
-    def get_model_performance(self) -> Dict[str, Dict]:
-        """Analyze performance of individual models."""
-        if len(self.prediction_history) < 10:
-            return {}
+    def get_model_contributions(
+        self,
+        X: np.ndarray
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Get detailed breakdown of each model's contribution.
 
-        performance = {}
-        # This would need actual outcome data to calculate properly
-        # For now, return weight distribution
-        for name in self.models:
-            performance[name] = {
-                'weight': self.weights.get(name, 0),
-                'predictions_made': len(self.prediction_history)
+        Args:
+            X: Input features
+
+        Returns:
+            Dictionary of model_name -> {
+                'prediction': float,
+                'weight': float,
+                'contribution': float (prediction × weight)
             }
+        """
+        contributions = {}
 
-        return performance
+        for name, model in self.models.items():
+            weight = self.weights.get(name, 0)
+
+            if weight == 0:
+                contributions[name] = {
+                    'prediction': 0.0,
+                    'weight': 0.0,
+                    'contribution': 0.0,
+                    'excluded': True
+                }
+                continue
+
+            try:
+                pred = model.predict(X) if hasattr(model, 'predict') else model.predict_single(X)
+                pred = float(pred) if not isinstance(pred, float) else pred
+
+                contributions[name] = {
+                    'prediction': pred,
+                    'weight': weight,
+                    'contribution': pred * weight,
+                    'excluded': False
+                }
+            except Exception as e:
+                logger.warning(f"Error getting prediction from {name}: {e}")
+                contributions[name] = {
+                    'prediction': 0.0,
+                    'weight': weight,
+                    'contribution': 0.0,
+                    'error': str(e)
+                }
+
+        return contributions
+
+    def _log_ensemble_configuration(self):
+        """Log ensemble configuration for debugging."""
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("PERFORMANCE-WEIGHTED ENSEMBLE INITIALIZED")
+        logger.info("=" * 70)
+        logger.info(f"Total models: {len(self.models)}")
+        logger.info(f"Active models: {sum(1 for w in self.weights.values() if w > 0)}")
+        logger.info(f"Excluded models: {sum(1 for w in self.weights.values() if w == 0)}")
+        logger.info(f"Min directional accuracy: {self.min_dir_acc:.2%}")
+        logger.info(f"Min correlation: {self.min_correlation:.4f}")
+        logger.info("")
+
+    def update_weights(
+        self,
+        new_metrics: Dict[str, Dict[str, float]]
+    ):
+        """
+        Update ensemble weights based on new performance metrics.
+
+        Useful for adaptive weighting during live trading.
+
+        Args:
+            new_metrics: Updated performance metrics
+        """
+        logger.info("Updating ensemble weights with new metrics...")
+        self.metrics = new_metrics
+        self.weights = self.calculate_dynamic_weights(new_metrics)
+        logger.info("Weights updated successfully!")
+
+
+# Export for use in other modules
+__all__ = ['PerformanceWeightedEnsemble']

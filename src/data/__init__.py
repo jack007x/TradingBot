@@ -1,11 +1,5 @@
-"""Data management module for AI Trading Bot."""
+"""Data processing and augmentation utilities"""
 
-from .data_manager import DataManager
-from .data_preprocessor import DataPreprocessor
-from .market_data import MarketDataFetcher
+from .augmentation import TimeSeriesAugmenter
 
-__all__ = [
-    "DataManager",
-    "DataPreprocessor",
-    "MarketDataFetcher",
-]
+__all__ = ['TimeSeriesAugmenter']

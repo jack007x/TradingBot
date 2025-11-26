@@ -25,6 +25,7 @@ from .models.neural_networks.gru_model import GRUPredictor
 from .models.neural_networks.cnn_model import CNNPatternRecognizer
 from .models.neural_networks.directional_predictor import DirectionalPredictor
 from .models.neural_networks.regression_predictor import RegressionPredictor
+from .models.neural_networks.attention_predictor import AttentionRegressionLSTM, AttentionRegressionGRU
 from .models.reinforcement_learning.dql_agent import DQLTradingAgent
 from .models.reinforcement_learning.trading_env import TradingEnvironment
 from .models.nlp.sentiment_analyzer import SentimentAnalyzer
@@ -33,7 +34,8 @@ from .models.xai.explainer import ModelExplainer
 from .risk_management.risk_manager import RiskManager
 from .risk_management.position_sizer import PositionSizer
 from .strategies.self_learning_engine import SelfLearningEngine
-from .strategies.ensemble_strategy import EnsembleStrategy
+from .strategies.ensemble_strategy import EnsembleStrategy, PerformanceWeightedEnsemble
+from .data.augmentation import TimeSeriesAugmenter
 
 
 class MT5TradingBot:
@@ -254,30 +256,48 @@ class MT5TradingBot:
         # Split data (NO stratification needed - continuous targets!)
         splits = self.preprocessor.split_data(X, y, train_ratio=0.7, val_ratio=0.15, stratify=False)
 
-        # Train Regression LSTM (predicts CONTINUOUS returns, not discrete classes!)
-        logger.info("Training Regression LSTM model...")
-        logger.info("  → Predicting continuous returns (NO class imbalance issues!)")
-        logger.info("  → NO SMOTE needed (all data is real!)")
-        logger.info("  → Simple MSE loss (not Focal Loss complexity!)")
+        # 🚀 NEW: Data Augmentation (2-3x effective training data!)
+        logger.info("=" * 70)
+        logger.info("🚀 APPLYING DATA AUGMENTATION")
+        logger.info("=" * 70)
+        augmenter = TimeSeriesAugmenter(
+            magnitude_range=(0.98, 1.02),  # ±2% magnitude variation
+            jitter_std=0.001,               # Small noise
+            augment_ratio=1.5               # 1.5x more data
+        )
+        X_train_aug, y_train_aug = augmenter.augment_batch(
+            splits['X_train'], splits['y_train']
+        )
+        logger.info(f"Training data augmented: {len(splits['X_train'])} → {len(X_train_aug)} samples")
+        logger.info("=" * 70)
+
+        # Train Attention-LSTM (ADVANCED architecture with multi-head attention!)
+        logger.info("Training Attention-LSTM model (Advanced Architecture)...")
+        logger.info("  → Multi-head attention mechanism (4 heads)")
+        logger.info("  → Bidirectional LSTM (3 layers)")
+        logger.info("  → Residual connections + Layer normalization")
+        logger.info("  → Deeper feature extraction network")
+        logger.info("  → TradingLoss (rebalanced: 70% MSE, 25% direction, 5% variance)")
 
         self.lstm_model = RegressionPredictor(
             input_size=input_size,
-            model_type='lstm',
-            hidden_size=128,  # Can use larger size - regression is more stable
-            num_layers=2,
+            model_type='attention_lstm',  # 🚀 UPGRADE: Use attention-based architecture
+            hidden_size=128,
+            num_layers=3,  # 🚀 UPGRADE: Deeper (was 2)
             dropout=0.3,
-            learning_rate=1e-3,  # Can use higher LR - no class imbalance issues
+            learning_rate=1e-3,
             weight_decay=1e-5,
-            loss_fn='trading'  # ✅ FIX: Use TradingLoss (directional + variance)
+            loss_fn='trading'  # TradingLoss with rebalanced weights
         )
 
         self.lstm_model.train(
-            splits['X_train'], splits['y_train'],
+            X_train_aug, y_train_aug,  # 🚀 UPGRADE: Use augmented data
             splits['X_val'], splits['y_val'],
             epochs=100,
             batch_size=64,
-            early_stopping_patience=20
-            # NO use_smote, NO smote_k_neighbors - not needed for regression!
+            early_stopping_patience=20,
+            min_epochs_before_check=15,       # 🚀 NEW: Allow 15 epochs before checking
+            negative_corr_streak_threshold=5  # 🚀 NEW: Require 5 consecutive negative
         )
 
         results['lstm'] = self.lstm_model.evaluate(splits['X_test'], splits['y_test'])
@@ -294,30 +314,30 @@ class MT5TradingBot:
             logger.info(f"✅ LSTM directional accuracy ({results['lstm']['directional_accuracy']:.4f}) "
                        "above 50% - good trading signal!")
 
-        # Train Regression GRU (predicts CONTINUOUS returns, not discrete classes!)
-        logger.info("Training Regression GRU model...")
-        logger.info("  → Predicting continuous returns (NO class imbalance issues!)")
-        logger.info("  → NO SMOTE needed (all data is real!)")
-        logger.info("  → Simple MSE loss (not Focal Loss complexity!)")
+        # Train Regression GRU (keep basic for comparison)
+        logger.info("Training GRU model (Basic Architecture for comparison)...")
+        logger.info("  → Basic GRU (no attention - faster training)")
+        logger.info("  → TradingLoss (rebalanced: 70% MSE, 25% direction, 5% variance)")
 
         self.gru_model = RegressionPredictor(
             input_size=input_size,
-            model_type='gru',
-            hidden_size=128,  # Can use larger size - regression is more stable
+            model_type='gru',  # Keep basic GRU for comparison
+            hidden_size=128,
             num_layers=2,
             dropout=0.3,
-            learning_rate=1e-3,  # Can use higher LR - no class imbalance issues
+            learning_rate=1e-3,
             weight_decay=1e-5,
-            loss_fn='trading'  # ✅ FIX: Use TradingLoss (directional + variance)
+            loss_fn='trading'  # TradingLoss with rebalanced weights
         )
 
         self.gru_model.train(
-            splits['X_train'], splits['y_train'],
+            X_train_aug, y_train_aug,  # 🚀 UPGRADE: Use augmented data
             splits['X_val'], splits['y_val'],
             epochs=100,
             batch_size=64,
-            early_stopping_patience=20
-            # NO use_smote, NO smote_k_neighbors - not needed for regression!
+            early_stopping_patience=20,
+            min_epochs_before_check=15,       # 🚀 NEW: Allow 15 epochs before checking
+            negative_corr_streak_threshold=5  # 🚀 NEW: Require 5 consecutive negative
         )
 
         results['gru'] = self.gru_model.evaluate(splits['X_test'], splits['y_test'])
@@ -378,26 +398,50 @@ class MT5TradingBot:
         if results['dql']['mean_sharpe'] < 0.5:
             logger.warning(f"DQL Sharpe ratio ({results['dql']['mean_sharpe']:.4f}) below 0.5!")
 
-        # Setup ensemble
-        self._setup_ensemble()
+        # 🚀 NEW: Setup Performance-Weighted Ensemble (dynamic weighting!)
+        logger.info("=" * 70)
+        logger.info("🚀 CREATING PERFORMANCE-WEIGHTED ENSEMBLE")
+        logger.info("=" * 70)
+        self._setup_ensemble(results)
         self.models_trained = True
 
-        logger.info("All models trained successfully")
+        logger.info("=" * 70)
+        logger.info("✅ ALL MODELS TRAINED SUCCESSFULLY")
+        logger.info("=" * 70)
         return results
 
-    def _setup_ensemble(self) -> None:
-        """Setup ensemble strategy with trained models."""
+    def _setup_ensemble(self, results: Dict[str, Any]) -> None:
+        """Setup ensemble strategy with trained models and performance weighting."""
         models = {}
+        metrics = {}
 
+        # Collect models and their metrics
         if self.lstm_model:
-            models['lstm'] = self.lstm_model
-        if self.gru_model:
-            models['gru'] = self.gru_model
-        if self.dql_agent:
-            models['dql'] = self.dql_agent
-        if self.sentiment_analyzer:
-            models['sentiment'] = self.sentiment_analyzer
+            models['AttentionLSTM'] = self.lstm_model
+            metrics['AttentionLSTM'] = results.get('lstm', {})
 
+        if self.gru_model:
+            models['GRU'] = self.gru_model
+            metrics['GRU'] = results.get('gru', {})
+
+        if self.dql_agent:
+            models['DQL'] = self.dql_agent
+            # Convert DQL metrics to common format
+            dql_results = results.get('dql', {})
+            metrics['DQL'] = {
+                'directional_accuracy': dql_results.get('mean_win_rate', 0.5),
+                'correlation': min(dql_results.get('mean_sharpe', 0) / 2.0, 0.5)  # Rough proxy
+            }
+
+        # Create Performance-Weighted Ensemble (dynamic weighting based on validation metrics)
+        self.performance_ensemble = PerformanceWeightedEnsemble(
+            models=models,
+            metrics=metrics,
+            min_dir_acc=0.50,    # Must beat random (50%)
+            min_correlation=0.03  # Must have some predictive power
+        )
+
+        # Also keep old ensemble for compatibility
         self.ensemble_strategy = EnsembleStrategy(
             models=models,
             voting_method='weighted',

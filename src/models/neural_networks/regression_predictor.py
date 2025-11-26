@@ -218,8 +218,28 @@ class RegressionPredictor:
                 num_layers=num_layers,
                 dropout=dropout
             ).to(self.device)
+        elif model_type == 'attention_lstm':
+            # Advanced LSTM with multi-head attention
+            from .attention_predictor import AttentionRegressionLSTM
+            self.model = AttentionRegressionLSTM(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                num_heads=4,  # 4-head attention
+                dropout=dropout
+            ).to(self.device)
+        elif model_type == 'attention_gru':
+            # Advanced GRU with multi-head attention
+            from .attention_predictor import AttentionRegressionGRU
+            self.model = AttentionRegressionGRU(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                num_heads=4,  # 4-head attention
+                dropout=dropout
+            ).to(self.device)
         else:
-            raise ValueError(f"Unknown model type: {model_type}")
+            raise ValueError(f"Unknown model type: {model_type}. Choose from: lstm, gru, attention_lstm, attention_gru")
 
         # Select loss function
         # Import custom losses
