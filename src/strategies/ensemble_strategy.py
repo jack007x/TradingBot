@@ -308,5 +308,8 @@ class PerformanceWeightedEnsemble:
         logger.info("Weights updated successfully!")
 
 
+# Backward compatibility alias
+EnsembleStrategy = PerformanceWeightedEnsemble
+
 # Export for use in other modules
-__all__ = ['PerformanceWeightedEnsemble']
+__all__ = ['PerformanceWeightedEnsemble', 'EnsembleStrategy']
