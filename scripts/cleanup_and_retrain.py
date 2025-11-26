@@ -20,9 +20,18 @@ from pathlib import Path
 from datetime import datetime
 from loguru import logger
 import sys
+import os
 
 # Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Script is in scripts/ so we need to go up one level to get to project root
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+
+# Add project root to Python path
+sys.path.insert(0, str(project_root))
+
+# Change to project root directory so relative paths work
+os.chdir(project_root)
 
 def backup_old_models():
     """Backup old models before deletion."""
