@@ -267,7 +267,8 @@ class MT5TradingBot:
             num_layers=2,
             dropout=0.3,
             learning_rate=1e-3,  # Can use higher LR - no class imbalance issues
-            weight_decay=1e-5
+            weight_decay=1e-5,
+            loss_fn='trading'  # ✅ FIX: Use TradingLoss (directional + variance)
         )
 
         self.lstm_model.train(
@@ -306,7 +307,8 @@ class MT5TradingBot:
             num_layers=2,
             dropout=0.3,
             learning_rate=1e-3,  # Can use higher LR - no class imbalance issues
-            weight_decay=1e-5
+            weight_decay=1e-5,
+            loss_fn='trading'  # ✅ FIX: Use TradingLoss (directional + variance)
         )
 
         self.gru_model.train(
