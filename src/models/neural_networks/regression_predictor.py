@@ -349,7 +349,9 @@ class RegressionPredictor:
             y_val_t = torch.FloatTensor(y_val).to(self.device)
 
         best_val_loss = float('inf')
+        best_val_correlation = float('-inf')  # Track best correlation
         patience_counter = 0
+        correlation_patience_counter = 0  # Separate patience for correlation
 
         for epoch in range(epochs):
             # Training
@@ -473,11 +475,31 @@ class RegressionPredictor:
                                 f"Variance: {comp.get('variance', 0):.6f}"
                             )
 
-                # Early stopping based on validation loss
-                if val_loss < best_val_loss - min_delta:
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                    # Save best model
+                # 🚨 CRITICAL: Check for negative correlation (disaster indicator!)
+                if val_correlation < 0:
+                    logger.error(f"🚨 NEGATIVE CORRELATION DETECTED: {val_correlation:.4f}")
+                    logger.error(f"   Model is predicting OPPOSITE direction!")
+                    logger.error(f"   This indicates TradingLoss weights are still imbalanced")
+                    logger.error(f"   Stopping training immediately!")
+                    # Restore best model (if any)
+                    if hasattr(self, 'best_state'):
+                        logger.info(f"   Restoring best model (epoch {self.best_state['epoch']})")
+                        logger.info(f"   Best correlation: {self.best_state['val_correlation']:.4f}")
+                        self.model.load_state_dict(self.best_state['model'])
+                        self.optimizer.load_state_dict(self.best_state['optimizer'])
+                    break
+
+                # Warning for low correlation
+                if val_correlation < 0.05:
+                    logger.warning(f"⚠️  Low correlation: {val_correlation:.4f} (target: >0.08)")
+                    logger.warning(f"   Model may need different loss function or hyperparameters")
+
+                # Early stopping based on CORRELATION (primary metric for trading!)
+                # Correlation is more important than raw loss for trading performance
+                if val_correlation > best_val_correlation + min_delta:
+                    best_val_correlation = val_correlation
+                    correlation_patience_counter = 0
+                    # Save best model based on correlation
                     self.best_state = {
                         'model': self.model.state_dict(),
                         'optimizer': self.optimizer.state_dict(),
@@ -486,15 +508,28 @@ class RegressionPredictor:
                         'val_direction_acc': val_direction_acc,
                         'val_correlation': val_correlation
                     }
+                    logger.debug(f"📊 New best correlation: {val_correlation:.4f} (epoch {epoch+1})")
+                else:
+                    correlation_patience_counter += 1
+
+                # Also track best loss (secondary metric)
+                if val_loss < best_val_loss - min_delta:
+                    best_val_loss = val_loss
+                    patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= early_stopping_patience:
-                        logger.info(f"Early stopping at epoch {epoch + 1}")
-                        # Restore best model
-                        if hasattr(self, 'best_state'):
-                            self.model.load_state_dict(self.best_state['model'])
-                            self.optimizer.load_state_dict(self.best_state['optimizer'])
-                        break
+
+                # Early stopping: Use correlation patience as primary, loss as backup
+                if correlation_patience_counter >= early_stopping_patience:
+                    logger.info(f"Early stopping at epoch {epoch + 1} (correlation not improving)")
+                    # Restore best model (based on correlation!)
+                    if hasattr(self, 'best_state'):
+                        logger.info(f"Restoring best model from epoch {self.best_state['epoch']}")
+                        logger.info(f"  Best correlation: {self.best_state['val_correlation']:.4f}")
+                        logger.info(f"  Best val loss: {self.best_state['val_loss']:.6f}")
+                        self.model.load_state_dict(self.best_state['model'])
+                        self.optimizer.load_state_dict(self.best_state['optimizer'])
+                    break
             else:
                 if (epoch + 1) % 5 == 0:
                     logger.info(
