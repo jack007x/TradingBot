@@ -34,8 +34,18 @@ def diagnose():
 
     print("✅ MT5 initialized")
 
-    # Create data fetcher
-    data_fetcher = MT5DataFetcher()
+    # Create MT5 connector and data fetcher
+    from src.mt5.mt5_connector import MT5Connector
+
+    connector = MT5Connector()
+    if not connector.connect():
+        print("❌ Failed to connect to MT5")
+        mt5.shutdown()
+        return
+
+    print("✅ MT5 connected")
+
+    data_fetcher = MT5DataFetcher(connector)
     preprocessor = DataPreprocessor()
 
     # Test data fetching

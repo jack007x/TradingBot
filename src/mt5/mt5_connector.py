@@ -320,9 +320,9 @@ class MT5Connector:
             'swap_short': info.swap_short,
             'margin_initial': info.margin_initial,
             'margin_maintenance': info.margin_maintenance,
-            'contract_size': info.contract_size,
-            'tick_value': info.tick_value,
-            'tick_size': info.tick_size,
+            'contract_size': info.trade_contract_size,  # FIXED: Correct MT5 API attribute
+            'tick_value': info.trade_tick_value,        # FIXED: Correct MT5 API attribute
+            'tick_size': info.trade_tick_size,          # FIXED: Correct MT5 API attribute
             'trade_stops_level': info.trade_stops_level,
             'trade_freeze_level': info.trade_freeze_level,
             'bid': info.bid,
