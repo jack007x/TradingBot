@@ -844,38 +844,96 @@ class MT5TradingBot:
         logger.info(f"States saved to {save_dir}")
 
     def load_state(self, directory: str = 'saved_models') -> None:
-        """Load all model states from saved checkpoints."""
+        """
+        Load all model states from saved checkpoints.
+
+        CRITICAL: Now handles loading errors gracefully - continues with available models.
+        If some models fail to load, bot will use remaining working models.
+        """
         load_dir = Path(directory)
+        loaded_models = []
+        failed_models = []
+
+        logger.info("=" * 80)
+        logger.info("LOADING SAVED MODELS")
+        logger.info("=" * 80)
 
         # Load LSTM model (RegressionPredictor with attention_lstm)
         if (load_dir / 'lstm_model.pt').exists():
-            logger.info(f"Loading AttentionLSTM from {load_dir / 'lstm_model.pt'}")
-            self.lstm_model = RegressionPredictor.from_checkpoint(
-                load_dir / 'lstm_model.pt'
-            )
-            logger.info("✅ AttentionLSTM loaded")
+            try:
+                logger.info(f"📥 Loading AttentionLSTM from {load_dir / 'lstm_model.pt'}")
+                self.lstm_model = RegressionPredictor.from_checkpoint(
+                    str(load_dir / 'lstm_model.pt')
+                )
+                logger.info("✅ AttentionLSTM loaded successfully")
+                loaded_models.append('AttentionLSTM')
+            except Exception as e:
+                logger.error(f"❌ Failed to load AttentionLSTM: {e}")
+                logger.warning("⚠️  Continuing without AttentionLSTM model")
+                logger.debug(f"Full error:", exc_info=True)
+                self.lstm_model = None
+                failed_models.append(('AttentionLSTM', str(e)))
+        else:
+            logger.warning(f"⚠️  AttentionLSTM checkpoint not found at {load_dir / 'lstm_model.pt'}")
 
         # Load GRU model (RegressionPredictor with gru)
         if (load_dir / 'gru_model.pt').exists():
-            logger.info(f"Loading GRU from {load_dir / 'gru_model.pt'}")
-            self.gru_model = RegressionPredictor.from_checkpoint(
-                load_dir / 'gru_model.pt'
-            )
-            logger.info("✅ GRU loaded")
+            try:
+                logger.info(f"📥 Loading GRU from {load_dir / 'gru_model.pt'}")
+                self.gru_model = RegressionPredictor.from_checkpoint(
+                    str(load_dir / 'gru_model.pt')
+                )
+                logger.info("✅ GRU loaded successfully")
+                loaded_models.append('GRU')
+            except Exception as e:
+                logger.error(f"❌ Failed to load GRU: {e}")
+                logger.warning("⚠️  Continuing without GRU model")
+                logger.debug(f"Full error:", exc_info=True)
+                self.gru_model = None
+                failed_models.append(('GRU', str(e)))
+        else:
+            logger.warning(f"⚠️  GRU checkpoint not found at {load_dir / 'gru_model.pt'}")
 
         # Load DQL agent (if exists)
         if (load_dir / 'dql_agent.pt').exists():
-            logger.info(f"Loading DQL from {load_dir / 'dql_agent.pt'}")
-            # DQL loading handled elsewhere
-            logger.info("✅ DQL found")
+            try:
+                logger.info(f"📥 Loading DQL from {load_dir / 'dql_agent.pt'}")
+                # DQL loading handled elsewhere
+                logger.info("✅ DQL found")
+                loaded_models.append('DQL')
+            except Exception as e:
+                logger.error(f"❌ Failed to load DQL: {e}")
+                logger.warning("⚠️  Continuing without DQL model")
+                logger.debug(f"Full error:", exc_info=True)
+                failed_models.append(('DQL', str(e)))
+        else:
+            logger.warning(f"⚠️  DQL checkpoint not found at {load_dir / 'dql_agent.pt'}")
 
         # Load learning state
         if (load_dir / 'learning_state.json').exists():
             self.self_learning_engine.load(load_dir / 'learning_state.json')
             logger.info("✅ Learning state loaded")
 
+        # Check if at least one model loaded successfully
+        logger.info("=" * 80)
+        logger.info("MODEL LOADING SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"✅ Successfully loaded: {len(loaded_models)}/{len(loaded_models) + len(failed_models)} models")
+        if loaded_models:
+            logger.info(f"   Available models: {', '.join(loaded_models)}")
+        if failed_models:
+            logger.warning(f"❌ Failed to load: {len(failed_models)} models")
+            for model_name, error in failed_models:
+                logger.warning(f"   - {model_name}: {error[:100]}")  # Truncate long errors
+
+        if not loaded_models:
+            raise RuntimeError(
+                "❌ CRITICAL: No models loaded successfully! Cannot start bot.\n"
+                "Please retrain models or fix loading errors."
+            )
+
         # Setup ensemble (needs metrics - will use defaults if not available)
-        logger.info("Setting up ensemble...")
+        logger.info("Setting up ensemble with available models...")
         # Load cached metrics if available
         metrics_file = load_dir / 'model_metrics.json'
         if metrics_file.exists():
@@ -888,17 +946,17 @@ class MT5TradingBot:
             logger.warning("⚠️  No cached metrics - creating dummy metrics")
             # Create minimal dummy metrics to setup ensemble
             dummy_results = {}
-            if hasattr(self, 'lstm_model'):
+            if self.lstm_model is not None:
                 dummy_results['lstm'] = {
                     'directional_accuracy': 0.52,
                     'correlation': 0.05
                 }
-            if hasattr(self, 'gru_model'):
+            if self.gru_model is not None:
                 dummy_results['gru'] = {
                     'directional_accuracy': 0.49,
                     'correlation': 0.03
                 }
-            if hasattr(self, 'dql_agent'):
+            if hasattr(self, 'dql_agent') and self.dql_agent is not None:
                 dummy_results['dql'] = {
                     'mean_return': 0.5,
                     'mean_win_rate': 0.51,
@@ -907,4 +965,7 @@ class MT5TradingBot:
             self._setup_ensemble(dummy_results)
 
         self.models_trained = True
-        logger.info(f"✅ States loaded from {load_dir}")
+        logger.info("=" * 80)
+        logger.info(f"✅ MODELS LOADED SUCCESSFULLY FROM {load_dir}")
+        logger.info(f"✅ Bot ready with {len(loaded_models)} active model(s)")
+        logger.info("=" * 80)

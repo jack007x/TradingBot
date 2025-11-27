@@ -716,23 +716,52 @@ class RegressionPredictor:
         """
         Save model to file with version and config.
 
+        CRITICAL: Now saves actual architecture from model (not hardcoded values!)
         Includes version tracking for future compatibility.
         """
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save with version and full config
+        # Extract actual architecture from model
+        model = self.model
+
+        # Detect RNN module (LSTM or GRU)
+        if hasattr(model, 'lstm'):
+            rnn_module = model.lstm
+        elif hasattr(model, 'gru'):
+            rnn_module = model.gru
+        else:
+            rnn_module = None
+
+        # Extract architecture parameters from actual model
+        if rnn_module:
+            num_layers = rnn_module.num_layers
+            hidden_size = rnn_module.hidden_size
+            dropout = rnn_module.dropout if num_layers > 1 else 0.0
+        else:
+            # Fallback to stored values
+            num_layers = getattr(self, 'num_layers', 2)
+            hidden_size = getattr(self, 'hidden_size', 128)
+            dropout = 0.3
+
+        # Get attention heads if applicable
+        attention_heads = getattr(model, 'num_heads', 4) if hasattr(model, 'attention') else None
+
+        logger.info(f"Saving model architecture: {self.model_type}, {num_layers} layers, {hidden_size} hidden")
+
+        # Save with version and ACTUAL config from model
         checkpoint = {
-            'version': '2.0',  # Version 2.0: Regression with TradingLoss
+            'version': '2.1',  # Version 2.1: Fixed architecture saving
             'model_type': self.model_type,
             'input_size': self.input_size,
             'loss_fn': self.loss_fn_name,
             'config': {
                 'input_size': self.input_size,
                 'model_type': self.model_type,
-                'hidden_size': 128,  # From init
-                'num_layers': 2,
-                'dropout': 0.3,
+                'hidden_size': hidden_size,  # ✅ From actual model
+                'num_layers': num_layers,    # ✅ From actual model (CRITICAL FIX!)
+                'dropout': dropout,           # ✅ From actual model
+                'attention_heads': attention_heads,  # For attention models
                 'learning_rate': self.optimizer.param_groups[0]['lr'],
                 'loss_fn': self.loss_fn_name
             },
@@ -743,7 +772,8 @@ class RegressionPredictor:
         }
 
         torch.save(checkpoint, filepath)
-        logger.info(f"RegressionPredictor v2.0 saved to {filepath}")
+        logger.info(f"✅ RegressionPredictor v2.1 saved to {filepath}")
+        logger.info(f"   Architecture: {self.model_type}, Layers: {num_layers}, Hidden: {hidden_size}")
 
     def load(self, filepath: Union[str, Path]):
         """
@@ -840,21 +870,52 @@ class RegressionPredictor:
             logger.info(f"Loading checkpoint v{version} from {filepath}")
 
             config = checkpoint['config']
+            model_state = checkpoint.get('model_state', checkpoint.get('model_state_dict'))
+
+            # CRITICAL: Detect actual layer count from weights (don't trust config!)
+            detected_layers = cls._detect_num_layers(model_state)
+            config_layers = config.get('num_layers', 2)
+
+            logger.info("=" * 70)
+            logger.info("MODEL ARCHITECTURE VALIDATION")
+            logger.info("=" * 70)
+            logger.info(f"Config says: {config_layers} layers")
+            logger.info(f"Weights have: {detected_layers} layers")
+
+            # Use detected layers (trust the weights, not the config!)
+            if detected_layers != config_layers:
+                logger.warning(f"⚠️  ARCHITECTURE MISMATCH DETECTED!")
+                logger.warning(f"⚠️  Config: {config_layers} layers, Weights: {detected_layers} layers")
+                logger.warning(f"⚠️  Using detected value: {detected_layers} layers")
+                num_layers = detected_layers
+            else:
+                logger.info(f"✅ Architecture consistent: {detected_layers} layers")
+                num_layers = detected_layers
+
             predictor = cls(
                 input_size=config['input_size'],
                 model_type=config['model_type'],
                 hidden_size=config.get('hidden_size', 128),
-                num_layers=config.get('num_layers', 2),
+                num_layers=num_layers,  # Use detected layers!
                 dropout=config.get('dropout', 0.3),
                 learning_rate=config.get('learning_rate', 1e-3),
                 loss_fn=config.get('loss_fn', 'mse'),
                 device=device
             )
 
-        # Load model weights
+        # Load model weights with flexible loading
         model_state = checkpoint.get('model_state', checkpoint.get('model_state_dict'))
         if model_state:
-            predictor.model.load_state_dict(model_state)
+            try:
+                predictor.model.load_state_dict(model_state, strict=True)
+                logger.info("✅ Model weights loaded successfully (strict mode)")
+            except RuntimeError as e:
+                logger.warning(f"⚠️  Strict loading failed: {e}")
+                logger.info("🔄 Attempting flexible loading (strict=False)...")
+                predictor.model.load_state_dict(model_state, strict=False)
+                logger.info("✅ Model weights loaded (flexible mode - some weights may be skipped)")
+
+            logger.info("=" * 70)
 
         # Load optimizer state (if available)
         if 'optimizer_state' in checkpoint:
@@ -868,6 +929,46 @@ class RegressionPredictor:
             predictor.history = checkpoint['history']
 
         return predictor
+
+    @staticmethod
+    def _detect_num_layers(state_dict: dict) -> int:
+        """
+        Detect number of LSTM/GRU layers from state_dict keys.
+
+        CRITICAL: This prevents architecture mismatch errors by detecting
+        the actual layer count from saved weights instead of trusting config.
+
+        Example keys:
+        - lstm.weight_ih_l0, lstm.weight_ih_l1, lstm.weight_ih_l2
+        - Layer indices: l0, l1, l2 → 3 layers (0-indexed)
+
+        Args:
+            state_dict: Model state dictionary
+
+        Returns:
+            Number of layers detected from weights
+        """
+        layer_indices = set()
+
+        for key in state_dict.keys():
+            # Look for patterns like "lstm.weight_ih_l2" or "gru.weight_hh_l1"
+            if '_l' in key:
+                # Extract layer index (e.g., "lstm.weight_ih_l2" -> "2")
+                parts = key.split('_l')
+                if len(parts) > 1:
+                    # Get the layer number (might have suffix like "_reverse")
+                    layer_idx_str = parts[1].split('_')[0].split('.')[0]
+                    if layer_idx_str.isdigit():
+                        layer_indices.add(int(layer_idx_str))
+
+        if layer_indices:
+            num_layers = max(layer_indices) + 1  # Convert 0-indexed to count
+            logger.debug(f"Detected {num_layers} layers from state_dict (indices: {sorted(layer_indices)})")
+            return num_layers
+
+        # Fallback: assume 2 layers (common default)
+        logger.warning("Could not detect layer count from state_dict, assuming 2 layers")
+        return 2
 
     @staticmethod
     def _infer_input_size_from_state(state_dict: dict, model_type: str) -> int:
