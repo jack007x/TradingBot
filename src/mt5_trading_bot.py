@@ -457,26 +457,82 @@ class MT5TradingBot:
         symbol: str,
         sequence_length: int = 60
     ) -> Optional[np.ndarray]:
-        """Get real-time feature sequence for prediction."""
-        df = self.mt5_data.fetch_ohlcv(symbol, '1h', sequence_length + 50)
+        """
+        Get real-time feature sequence for prediction.
 
-        if df.empty or len(df) < sequence_length:
+        CRITICAL: Fetches enough bars to account for:
+        - Technical indicator calculation (SMA 200 needs 200 bars!)
+        - NaN removal after indicators
+        - Sequence length requirement
+        """
+        # CRITICAL FIX: Fetch MUCH more bars to account for indicator calculation
+        # - SMA 200 needs 200 bars
+        # - Other indicators need warmup period
+        # - NaN removal will drop more
+        # - Need buffer
+        bars_to_fetch = max(300, sequence_length + 250)  # At least 300 bars
+
+        logger.info(f"=" * 80)
+        logger.info(f"📥 FETCHING REALTIME FEATURES FOR {symbol}")
+        logger.info(f"=" * 80)
+        logger.info(f"Sequence length needed: {sequence_length}")
+        logger.info(f"Fetching: {bars_to_fetch} bars")
+
+        df = self.mt5_data.fetch_ohlcv(symbol, '1h', bars_to_fetch)
+
+        logger.info(f"✅ Fetched {len(df)} raw bars")
+
+        if df.empty or len(df) < 100:
+            logger.error(f"❌ FETCH FAILED: Got only {len(df)} bars")
+            logger.error(f"   Requested: {bars_to_fetch}")
+            logger.error(f"   Check MT5 connection and symbol availability")
             return None
 
+        logger.info(f"📊 Adding technical indicators...")
         df = self.preprocessor.add_technical_indicators(df)
+        logger.info(f"✅ After indicators: {len(df)} bars")
+        logger.info(f"   Lost {bars_to_fetch - len(df)} bars to indicator calculation")
+
+        # Check for NaN
+        nan_count_before = df.isnull().sum().sum()
+        if nan_count_before > 0:
+            logger.warning(f"⚠️  Found {nan_count_before} NaN values before dropna()")
+
         df = df.dropna()
+        logger.info(f"✅ After NaN removal: {len(df)} bars")
 
         if len(df) < sequence_length:
+            logger.error(f"❌ INSUFFICIENT DATA after processing")
+            logger.error(f"   Have: {len(df)} bars")
+            logger.error(f"   Need: {sequence_length} bars for sequence")
+            logger.error(f"   Started with: {bars_to_fetch} bars")
+            logger.error(f"   Lost to indicators: {bars_to_fetch - len(df)} bars")
+            logger.error(f"💡 SOLUTION: Increase bars_to_fetch or check indicator configuration")
             return None
+
+        logger.info(f"✅ Sufficient data: {len(df)} >= {sequence_length}")
 
         # Scale data
         try:
+            logger.debug(f"Scaling data...")
             df_scaled = self.preprocessor.scale_data(df, fit=False, scaler_name=symbol)
+            logger.debug(f"✅ Using existing scaler for {symbol}")
         except ValueError:
+            logger.warning(f"⚠️  No scaler found for {symbol}, fitting new one")
             df_scaled = self.preprocessor.scale_data(df, fit=True, scaler_name=symbol)
 
         numeric_df = df_scaled.select_dtypes(include=[np.number])
-        return numeric_df.values[-sequence_length:].reshape(1, sequence_length, -1)
+        num_features = len(numeric_df.columns)
+
+        # Extract latest sequence
+        sequence = numeric_df.values[-sequence_length:].reshape(1, sequence_length, -1)
+
+        logger.info(f"✅ FEATURE EXTRACTION COMPLETE")
+        logger.info(f"   Final shape: {sequence.shape}")
+        logger.info(f"   (batch=1, timesteps={sequence_length}, features={num_features})")
+        logger.info(f"=" * 80)
+
+        return sequence
 
     async def get_trading_signal(self, symbol: str) -> Dict:
         """
