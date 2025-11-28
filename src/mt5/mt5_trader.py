@@ -513,7 +513,7 @@ class MT5Trader:
                 'tp': pos.tp,
                 'profit': pos.profit,
                 'swap': pos.swap,
-                'commission': pos.commission,
+                'commission': getattr(pos, 'commission', 0.0),  # FIXED: Safe access with default
                 'magic': pos.magic,
                 'comment': pos.comment,
                 'time': datetime.fromtimestamp(pos.time),
@@ -604,7 +604,7 @@ class MT5Trader:
                 'price': deal.price,
                 'profit': deal.profit,
                 'swap': deal.swap,
-                'commission': deal.commission,
+                'commission': getattr(deal, 'commission', 0.0),  # FIXED: Safe access with default
                 'magic': deal.magic,
                 'comment': deal.comment,
                 'time': datetime.fromtimestamp(deal.time),
