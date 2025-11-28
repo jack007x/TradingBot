@@ -79,6 +79,7 @@ class MT5TradingBot:
         self.gru_model: Optional[GRUPredictor] = None
         self.cnn_model: Optional[CNNPatternRecognizer] = None
         self.dql_agent: Optional[DQLTradingAgent] = None
+        self.ppo_agent: Optional['PPOTradingAgent'] = None  # PPO Reinforcement Learning
         self.sentiment_analyzer: Optional[SentimentAnalyzer] = None
 
         # Optimization and Explainability
