@@ -466,11 +466,12 @@ class MT5TradingBot:
         - Sequence length requirement
         """
         # CRITICAL FIX: Fetch MUCH more bars to account for indicator calculation
-        # - SMA 200 needs 200 bars
+        # - SMA 50 needs 50 bars (removed SMA 200 to reduce data loss)
+        # - Aroon 14 needs 14 bars (reduced from 25)
         # - Other indicators need warmup period
         # - NaN removal will drop more
-        # - Need buffer
-        bars_to_fetch = max(300, sequence_length + 250)  # At least 300 bars
+        # - Need buffer for safety
+        bars_to_fetch = max(500, sequence_length + 400)  # At least 500 bars
 
         logger.info(f"=" * 80)
         logger.info(f"📥 FETCHING REALTIME FEATURES FOR {symbol}")
@@ -527,9 +528,25 @@ class MT5TradingBot:
         # Extract latest sequence
         sequence = numeric_df.values[-sequence_length:].reshape(1, sequence_length, -1)
 
+        # CRITICAL FIX: Check feature variance to detect stale data
+        feature_variance = np.var(sequence)
+        if feature_variance < 1e-6:
+            logger.error(f"=" * 80)
+            logger.error(f"🚨 LOW FEATURE VARIANCE DETECTED!")
+            logger.error(f"   Variance: {feature_variance:.2e} (threshold: 1e-6)")
+            logger.error(f"   This indicates stale/frozen data - predictions will be stuck!")
+            logger.error(f"   Possible causes:")
+            logger.error(f"   1. Market closed (no new data)")
+            logger.error(f"   2. MT5 connection issue (data not updating)")
+            logger.error(f"   3. Scaler frozen (need refresh)")
+            logger.error(f"=" * 80)
+            logger.warning(f"⚠️  Returning None - skip trading on stale data")
+            return None
+
         logger.info(f"✅ FEATURE EXTRACTION COMPLETE")
         logger.info(f"   Final shape: {sequence.shape}")
         logger.info(f"   (batch=1, timesteps={sequence_length}, features={num_features})")
+        logger.info(f"   Feature variance: {feature_variance:.2e} (healthy)")
         logger.info(f"=" * 80)
 
         return sequence
@@ -934,6 +951,22 @@ class MT5TradingBot:
                             logger.error(f"   3. Model in degenerate state")
                             logger.error(f"   4. Input features not changing")
                             logger.error("=" * 80)
+
+                            # CRITICAL FIX: Force scaler refresh and skip this iteration
+                            logger.warning(f"🔄 Attempting scaler refresh for {symbol}...")
+                            try:
+                                if hasattr(self.preprocessor, 'scalers') and symbol in self.preprocessor.scalers:
+                                    del self.preprocessor.scalers[symbol]
+                                    logger.info(f"✅ Scaler deleted for {symbol} - will refit on next iteration")
+                                else:
+                                    logger.warning(f"⚠️  No scaler found for {symbol}")
+                            except Exception as e:
+                                logger.error(f"❌ Failed to delete scaler: {e}")
+
+                            # Clear prediction history to force fresh start
+                            prediction_history[symbol] = []
+                            logger.warning(f"⚠️  Skipping trading on {symbol} - waiting for fresh data")
+                            continue  # Skip to next symbol
                         else:
                             logger.debug(f"✅ Prediction variance OK: {pred_std:.6f}")
 
@@ -942,11 +975,26 @@ class MT5TradingBot:
                                f"Confidence: {signal.get('confidence', 0):.2f} | "
                                f"Reason: {signal.get('reason', 'N/A')}")
 
+                    # CRITICAL FIX: Session filter for Gold (avoid Asian session low liquidity)
+                    if 'XAU' in symbol:
+                        hour_utc = datetime.utcnow().hour
+                        # Asian session: 22:00 - 07:00 UTC (low liquidity for Gold)
+                        # Best Gold trading: London (07:00-16:00) and NY (13:00-22:00) sessions
+                        if hour_utc < 7 or hour_utc > 21:
+                            logger.warning(f"=" * 80)
+                            logger.warning(f"⏸️  SKIPPING {symbol} - ASIAN SESSION")
+                            logger.warning(f"   Current UTC hour: {hour_utc}")
+                            logger.warning(f"   Gold has low liquidity during Asian session (22:00-07:00 UTC)")
+                            logger.warning(f"   Best trading: London (07:00-16:00) or NY (13:00-22:00) sessions")
+                            logger.warning(f"=" * 80)
+                            continue  # Skip to next symbol
+
                     # Execute trade if signal is strong
-                    # CRITICAL FIX: Lowered from 0.60 to 0.30 to account for single-model ensemble
-                    # With AttentionLSTM at 48% test accuracy, 60% confidence was unrealistic
-                    # Current confidence ~0.37, so 0.30 threshold allows trades while filtering noise
-                    MIN_CONFIDENCE_THRESHOLD = 0.30  # 30% minimum confidence
+                    # CRITICAL FIX: Raised from 0.30 to 0.50 to reduce overtrading
+                    # After emergency exit at -7%, we need higher quality signals
+                    # 50% threshold balances opportunity vs risk management
+                    # Target: Win rate 55-60% with R:R 2:1 = profitable
+                    MIN_CONFIDENCE_THRESHOLD = 0.50  # 50% minimum confidence
 
                     if signal['signal'] != 'hold':
                         if signal.get('confidence', 0) > MIN_CONFIDENCE_THRESHOLD:

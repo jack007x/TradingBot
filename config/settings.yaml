@@ -32,11 +32,13 @@ trading:
   default_lot_size: 0.01
 
 # Risk Management
+# CRITICAL FIX: Reduced risk after -7% emergency exit
+# Conservative approach: Lower risk per trade + tighter drawdown limits
 risk:
-  max_risk_per_trade: 0.02  # 2% of portfolio
-  max_daily_drawdown: 0.05  # 5%
-  max_total_drawdown: 0.15  # 15%
-  risk_reward_ratio: 2.0
+  max_risk_per_trade: 0.01  # 1% of portfolio (reduced from 2%)
+  max_daily_drawdown: 0.03  # 3% (reduced from 5%)
+  max_total_drawdown: 0.10  # 10% (reduced from 15%)
+  risk_reward_ratio: 2.0  # Target 2:1 R:R minimum
   trailing_stop: true
   trailing_stop_pct: 0.01  # 1%
   use_dynamic_position_sizing: true

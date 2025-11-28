@@ -328,6 +328,22 @@ class PerformanceWeightedEnsemble:
                 - prediction: Raw return prediction
                 - individual_predictions: Per-model predictions
         """
+        # CRITICAL FIX: Check feature variance to detect stale data
+        feature_std = np.std(features)
+        if feature_std < 0.001:
+            logger.warning("=" * 80)
+            logger.warning("⚠️  LOW FEATURE VARIANCE DETECTED!")
+            logger.warning(f"   Feature std: {feature_std:.6f} (threshold: 0.001)")
+            logger.warning(f"   This indicates stale/frozen data - predictions may be stuck!")
+            logger.warning("=" * 80)
+            return {
+                'signal': 'hold',
+                'confidence': 0.0,
+                'prediction': 0.0,
+                'reason': 'Stale data detected (low variance)',
+                'individual_predictions': {}
+            }
+
         # Get ensemble prediction
         prediction, confidence = self.predict(features, return_confidence=True)
 

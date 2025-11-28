@@ -78,14 +78,16 @@ class DataPreprocessor:
         df['close_open_ratio'] = df['close'] / df['open']
 
         # ============== Moving Averages ==============
-        for period in [5, 10, 20, 50, 100, 200]:
+        # CRITICAL FIX: Removed SMA/EMA 100 & 200 to reduce data loss
+        # These long-period indicators caused 64% data loss (200 bars lost from 310)
+        for period in [5, 10, 20, 50]:
             df[f'sma_{period}'] = df['close'].rolling(window=period).mean()
             df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
 
         # Moving average crossovers
         df['sma_cross_5_20'] = (df['sma_5'] > df['sma_20']).astype(int)
         df['sma_cross_20_50'] = (df['sma_20'] > df['sma_50']).astype(int)
-        df['price_above_sma_200'] = (df['close'] > df['sma_200']).astype(int)
+        # Removed price_above_sma_200 (no longer needed)
 
         # Distance from moving averages
         df['dist_from_sma_20'] = (df['close'] - df['sma_20']) / df['sma_20']
@@ -172,7 +174,8 @@ class DataPreprocessor:
         df['minus_di'] = minus_di
 
         # Aroon
-        period = 25
+        # CRITICAL FIX: Reduced period from 25 to 14 to reduce data loss
+        period = 14
         df['aroon_up'] = 100 * df['high'].rolling(period + 1).apply(
             lambda x: x.argmax()) / period
         df['aroon_down'] = 100 * df['low'].rolling(period + 1).apply(
