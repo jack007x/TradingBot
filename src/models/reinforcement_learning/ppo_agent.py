@@ -187,6 +187,73 @@ class PPOTradingAgent:
         confidence = float(probs[action])
         return int(action), confidence
 
+    def predict_single(self, state: np.ndarray) -> float:
+        """
+        Generate single prediction compatible with ensemble.
+
+        Converts PPO discrete action to continuous return prediction
+        for integration with regression models (LSTM, GRU).
+
+        Actions: 0=hold, 1=buy, 2=sell
+
+        Args:
+            state: Current market state (can be 2D or 3D)
+
+        Returns:
+            Expected return prediction (-0.01 to +0.01)
+        """
+        if self.model is None:
+            logger.warning("PPO model not initialized")
+            return 0.0
+
+        try:
+            # Ensure state is 1D (flatten if needed)
+            if state.ndim > 1:
+                state = state.flatten()
+
+            # Ensure state matches environment observation space
+            # PPO expects flat vector, not sequences
+            if hasattr(self.env, 'observation_space'):
+                expected_size = self.env.observation_space.shape[0]
+                if state.shape[0] > expected_size:
+                    # Take last expected_size elements
+                    state = state[-expected_size:]
+                elif state.shape[0] < expected_size:
+                    # Pad with zeros
+                    padding = np.zeros(expected_size - state.shape[0])
+                    state = np.concatenate([padding, state])
+
+            # Get action and confidence
+            action, confidence = self.predict(state, deterministic=True)
+
+            # Convert discrete action to continuous prediction
+            # Action 0 = hold (0.0)
+            # Action 1 = buy (+0.01 = expect 1% gain)
+            # Action 2 = sell (-0.01 = expect 1% decline)
+            action_to_prediction = {
+                0: 0.0,       # hold - neutral expectation
+                1: 0.01,      # buy - positive return expectation
+                2: -0.01      # sell - negative return expectation
+            }
+
+            base_pred = action_to_prediction.get(int(action), 0.0)
+
+            # Scale by confidence (higher confidence = stronger signal)
+            # Confidence from action probability (0-1)
+            scaled_pred = base_pred * confidence
+
+            # Clamp to reasonable range
+            prediction = float(np.clip(scaled_pred, -0.01, 0.01))
+
+            logger.debug(f"PPO predict_single: action={action}, "
+                        f"confidence={confidence:.3f}, prediction={prediction:.4f}")
+
+            return prediction
+
+        except Exception as e:
+            logger.error(f"PPO predict_single error: {e}", exc_info=True)
+            return 0.0
+
     def get_action_probabilities(self, observation: np.ndarray) -> np.ndarray:
         """Get probabilities for all actions."""
         if self.model is None:

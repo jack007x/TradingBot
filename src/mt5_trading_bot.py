@@ -441,6 +441,17 @@ class MT5TradingBot:
                 'correlation': min(dql_results.get('mean_sharpe', 0) / 2.0, 0.5)  # Rough proxy
             }
 
+        # Add PPO agent if trained
+        if self.ppo_agent:
+            models['PPO'] = self.ppo_agent
+            # Convert PPO metrics to common format
+            ppo_results = results.get('ppo', {})
+            metrics['PPO'] = {
+                'directional_accuracy': ppo_results.get('mean_win_rate', 0.5),
+                'correlation': min(ppo_results.get('mean_sharpe', 0) / 2.0, 0.5)  # Rough proxy
+            }
+            logger.info("✅ PPO agent added to ensemble")
+
         # Create Performance-Weighted Ensemble (dynamic weighting based on validation metrics)
         self.performance_ensemble = PerformanceWeightedEnsemble(
             models=models,
@@ -606,6 +617,52 @@ class MT5TradingBot:
         except Exception as e:
             logger.error(f"❌ Error getting ensemble signal: {e}", exc_info=True)
             return {'signal': 'hold', 'reason': f'Ensemble error: {str(e)}', 'confidence': 0.0}
+
+        # SENTIMENT INTEGRATION: Adjust prediction by news sentiment
+        if sentiment_data:
+            sentiment_signal = 0.0
+
+            # Convert sentiment to trading signal adjustment
+            if sentiment_data.get('sentiment') == 'bullish':
+                sentiment_signal = sentiment_data.get('confidence', 0) * 0.005  # +0.5% boost
+            elif sentiment_data.get('sentiment') == 'bearish':
+                sentiment_signal = -sentiment_data.get('confidence', 0) * 0.005  # -0.5% penalty
+
+            if sentiment_signal != 0:
+                logger.info("=" * 80)
+                logger.info("📰 NEWS SENTIMENT ANALYSIS")
+                logger.info("=" * 80)
+                logger.info(f"   Sentiment: {sentiment_data.get('sentiment', 'neutral').upper()}")
+                logger.info(f"   Confidence: {sentiment_data.get('confidence', 0):.2f}")
+                logger.info(f"   Bullish news: {sentiment_data.get('bullish_count', 0)}")
+                logger.info(f"   Bearish news: {sentiment_data.get('bearish_count', 0)}")
+                logger.info(f"   Neutral news: {sentiment_data.get('neutral_count', 0)}")
+
+                # Adjust ensemble prediction
+                original_pred = signal.get('prediction', 0.0)
+                adjusted_pred = original_pred + (sentiment_signal * 0.2)  # 20% weight to sentiment
+
+                logger.info(f"   Original prediction: {original_pred:+.4f}")
+                logger.info(f"   Sentiment adjustment: {sentiment_signal:+.4f} × 0.2 = {sentiment_signal * 0.2:+.4f}")
+                logger.info(f"   Adjusted prediction: {adjusted_pred:+.4f}")
+
+                signal['prediction'] = adjusted_pred
+                signal['sentiment_adjusted'] = True
+
+                # Recalculate signal if threshold crossed
+                signal_threshold = 0.0008
+                if adjusted_pred > signal_threshold:
+                    new_signal = 'buy'
+                elif adjusted_pred < -signal_threshold:
+                    new_signal = 'sell'
+                else:
+                    new_signal = 'hold'
+
+                if new_signal != signal.get('signal'):
+                    logger.info(f"   Signal changed: {signal.get('signal')} → {new_signal}")
+                    signal['signal'] = new_signal
+
+                logger.info("=" * 80)
 
         # CRITICAL FIX: Momentum Fallback Strategy
         # If ML models fail (low confidence or all HOLD), use proven technical analysis
