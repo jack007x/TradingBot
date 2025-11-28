@@ -631,8 +631,10 @@ class DataPreprocessor:
             # Forward percentage return
             df[f'target_return_{h}h'] = df[target_col].pct_change(h).shift(-h)
 
-        # Primary target (typically mid-horizon, e.g., 4h)
-        primary_horizon = horizons[1] if len(horizons) > 1 else horizons[0]
+        # Primary target - CRITICAL FIX: Use shortest horizon (1h) instead of 4h
+        # 4h horizon too noisy for Gold - caused poor correlation and negative R²
+        # 1h horizon has better signal-to-noise ratio
+        primary_horizon = horizons[0]  # Always use first (shortest) horizon
         df['target_return'] = df[f'target_return_{primary_horizon}h']
 
         # Log statistics

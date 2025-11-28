@@ -607,6 +607,55 @@ class MT5TradingBot:
             logger.error(f"❌ Error getting ensemble signal: {e}", exc_info=True)
             return {'signal': 'hold', 'reason': f'Ensemble error: {str(e)}', 'confidence': 0.0}
 
+        # CRITICAL FIX: Momentum Fallback Strategy
+        # If ML models fail (low confidence or all HOLD), use proven technical analysis
+        # Gold trends well → momentum strategy is reliable fallback
+        if signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold':
+            logger.warning("=" * 80)
+            logger.warning("⚠️  ML MODELS LOW CONFIDENCE OR HOLD")
+            logger.warning(f"   Ensemble: {signal.get('signal')} @ {signal.get('confidence', 0):.2f}")
+            logger.warning("   Falling back to MOMENTUM STRATEGY...")
+            logger.warning("=" * 80)
+
+            try:
+                from src.strategies.simple_momentum import SimpleMomentumStrategy
+
+                # Initialize momentum strategy
+                momentum = SimpleMomentumStrategy()
+
+                # Get recent data with indicators
+                df = self.mt5_data.fetch_ohlcv(symbol, '1h', 100)
+                if df is not None and len(df) > 50:
+                    df = self.preprocessor.add_technical_indicators(df)
+                    df = df.dropna()
+
+                    # Get momentum signal
+                    momentum_signal = momentum.get_signal(df)
+
+                    logger.info(f"📊 Momentum signal: {momentum_signal['signal'].upper()} "
+                              f"@ {momentum_signal['confidence']:.2f}")
+                    logger.info(f"   Reasons: {', '.join(momentum_signal.get('reasons', []))}")
+
+                    # Use momentum if it has higher confidence than ensemble
+                    if momentum_signal['confidence'] > signal.get('confidence', 0):
+                        logger.info("✅ Using MOMENTUM signal (higher confidence)")
+                        signal = {
+                            'signal': momentum_signal['signal'],
+                            'confidence': momentum_signal['confidence'],
+                            'reason': 'Momentum: ' + ', '.join(momentum_signal.get('reasons', [])),
+                            'source': 'momentum_fallback',
+                            'buy_score': momentum_signal.get('buy_score', 0),
+                            'sell_score': momentum_signal.get('sell_score', 0),
+                            'prediction': 0.01 if momentum_signal['signal'] == 'buy' else -0.01 if momentum_signal['signal'] == 'sell' else 0
+                        }
+                    else:
+                        logger.warning("⚠️  Momentum also low confidence - keeping HOLD")
+                else:
+                    logger.warning("⚠️  Insufficient data for momentum strategy")
+
+            except Exception as e:
+                logger.error(f"❌ Error in momentum fallback: {e}", exc_info=True)
+
         # Get self-learning recommendation
         predictions = signal.get('individual_predictions', {})
         sl_signal = self.self_learning_engine.suggest_action(

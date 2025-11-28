@@ -122,8 +122,13 @@ class PerformanceWeightedEnsemble:
         total = sum(scores.values())
 
         if total == 0:
-            logger.warning("⚠️  NO MODELS MEET THRESHOLD! Using equal weights as fallback")
-            return {name: 1.0 / len(scores) for name in scores}
+            logger.warning("=" * 70)
+            logger.warning("⚠️  NO MODELS MEET MINIMUM THRESHOLD!")
+            logger.warning("   All models excluded due to poor performance")
+            logger.warning("   Returning ZERO weights → will trigger momentum fallback")
+            logger.warning("=" * 70)
+            # Return zero weights to signal failure → momentum fallback activates
+            return {name: 0.0 for name in scores}
 
         weights = {name: score / total for name, score in scores.items()}
 

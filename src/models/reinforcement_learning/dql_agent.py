@@ -347,6 +347,63 @@ class DQLTradingAgent:
 
         return action, confidence
 
+    def predict_single(self, state: np.ndarray) -> float:
+        """
+        Predict continuous value for ensemble integration.
+
+        Converts DQL Q-values to continuous prediction compatible with
+        regression models in ensemble.
+
+        Args:
+            state: Input state array (can be 2D or 3D)
+
+        Returns:
+            Float prediction in range ~-0.01 to +0.01 (buy to sell signal)
+        """
+        # Reshape state to match expected input
+        if len(state.shape) == 3:
+            # (1, seq_len, features) -> flatten to (1, seq_len * features)
+            batch_size = state.shape[0]
+            state = state.reshape(batch_size, -1)
+        elif len(state.shape) == 2:
+            # (seq_len, features) -> (1, seq_len * features)
+            state = state.reshape(1, -1)
+
+        # Ensure correct state size
+        if state.shape[1] != self.state_size:
+            # Take last state_size elements or pad with zeros
+            if state.shape[1] > self.state_size:
+                state = state[:, -self.state_size:]
+            else:
+                # Pad with zeros at the beginning
+                padding = np.zeros((state.shape[0], self.state_size - state.shape[1]))
+                state = np.concatenate([padding, state], axis=1)
+
+        # Get Q-values from policy network
+        state_tensor = torch.FloatTensor(state).to(self.device)
+
+        with torch.no_grad():
+            q_values = self.policy_net(state_tensor, dueling=self.use_dueling)
+
+        # Convert Q-values to continuous signal
+        # Q-values shape: [batch_size, action_size]
+        # Actions: [0=hold, 1=buy, 2=sell]
+        q_np = q_values.cpu().numpy()[0]
+
+        # Extract buy and sell Q-values
+        buy_q = q_np[1] if len(q_np) > 1 else 0
+        sell_q = q_np[2] if len(q_np) > 2 else 0
+
+        # Calculate directional signal: positive = buy, negative = sell
+        # Normalize to -1 to 1 range
+        signal = (buy_q - sell_q) / (abs(buy_q) + abs(sell_q) + 1e-8)
+
+        # Scale to match other models' prediction range (~0.003 for 0.3% return)
+        # DQL signal is -1 to 1, scale to approximately -0.01 to 0.01
+        prediction = float(signal * 0.01)
+
+        return prediction
+
     def store_transition(
         self,
         state: np.ndarray,

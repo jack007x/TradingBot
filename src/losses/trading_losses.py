@@ -50,24 +50,29 @@ class TradingLoss(nn.Module):
 
     def __init__(
         self,
-        mse_weight: float = 0.70,        # 🔧 FIX: Primary focus (was 0.4)
-        direction_weight: float = 0.25,  # 🔧 FIX: Secondary (was 0.4)
-        variance_weight: float = 0.05    # 🔧 FIX: Gentle nudge only (was 0.2, TOO HIGH!)
+        mse_weight: float = 0.40,        # 🔧 REBALANCED: Reduced from 0.70
+        direction_weight: float = 0.50,  # 🔧 REBALANCED: Increased from 0.25 (PRIMARY NOW!)
+        variance_weight: float = 0.10    # 🔧 REBALANCED: Increased from 0.05
     ):
         """
-        Initialize TradingLoss with rebalanced weights.
+        Initialize TradingLoss with direction-focused weights.
 
-        CRITICAL FIX: Previous weights (0.4/0.4/0.2) caused:
-        - Variance component dominated (100x larger than MSE!)
-        - Model learned to match variance, not patterns
-        - Negative correlation (-0.074) = predicting OPPOSITE direction!
+        CRITICAL FIX FOR POOR DIRECTIONAL ACCURACY:
+        Models were achieving ~49.5% directional accuracy (worse than random 50%)
+        because MSE was weighted too heavily.
 
-        New weights (0.70/0.25/0.05):
-        - MSE is primary objective (accuracy)
-        - Direction is secondary (trading signal)
-        - Variance is gentle nudge (anti-conservatism)
+        New weights (0.40/0.50/0.10):
+        - Direction is PRIMARY objective (50%) - trading cares about direction!
+        - MSE is secondary (40%) - magnitude still important but not primary
+        - Variance nudge (10%) - encourage bolder predictions
 
-        This fixes the negative correlation issue!
+        Expected improvement:
+        - Directional accuracy: 49.5% → 52-55%
+        - Better correlation with actual returns
+        - More actionable trading signals
+
+        Previous weights (0.70/0.25/0.05) optimized for statistical metrics,
+        not trading performance. Trading is about DIRECTION first!
         """
         super().__init__()
         self.mse_weight = mse_weight
