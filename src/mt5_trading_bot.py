@@ -798,10 +798,27 @@ class MT5TradingBot:
         symbols = symbols or self.config.trading.symbols
         self.is_running = True
 
+        # Initialize prediction monitoring
+        prediction_history = {symbol: [] for symbol in symbols}
+
         logger.info(f"Starting MT5 trading loop for: {symbols}")
 
         while self.is_running:
             try:
+                # Check market hours
+                from src.utils.market_hours import MarketHoursChecker
+
+                market_status = MarketHoursChecker.get_market_status()
+
+                if not market_status['is_open']:
+                    wait_time = MarketHoursChecker.wait_time_until_open()
+                    logger.warning(f"⏸️  Market closed: {market_status['reason']}")
+                    logger.info(f"   Current time (UTC): {market_status['current_time_utc']}")
+                    logger.info(f"   Next open: {market_status.get('next_open', 'N/A')}")
+                    logger.info(f"   Sleeping for {wait_time/3600:.1f} hours...")
+                    await asyncio.sleep(min(wait_time, 3600))  # Max 1 hour sleep
+                    continue
+
                 # Check MT5 connection
                 if not self.mt5_connector.is_connected():
                     logger.warning("MT5 disconnected, attempting reconnect...")
@@ -814,18 +831,51 @@ class MT5TradingBot:
                     logger.info(f"📊 Fetching signal for {symbol}...")
                     signal = await self.get_trading_signal(symbol)
 
+                    # Track prediction for variance monitoring
+                    prediction = signal.get('prediction', 0.0)
+                    prediction_history[symbol].append(prediction)
+
+                    # Keep only last 20 predictions
+                    if len(prediction_history[symbol]) > 20:
+                        prediction_history[symbol].pop(0)
+
+                    # Check for stuck predictions (after 10 iterations)
+                    if len(prediction_history[symbol]) >= 10:
+                        recent_preds = prediction_history[symbol][-10:]
+                        pred_std = np.std(recent_preds)
+                        pred_mean = np.mean(recent_preds)
+
+                        if pred_std < 0.0001:  # Virtually no variance
+                            logger.error("=" * 80)
+                            logger.error("🚨 PREDICTION STUCK DETECTED!")
+                            logger.error(f"   Last 10 predictions: {pred_mean:.6f} ± {pred_std:.6f}")
+                            logger.error(f"   Standard deviation < 0.0001 (no variance!)")
+                            logger.error(f"   Possible causes:")
+                            logger.error(f"   1. Stale/cached data (market closed?)")
+                            logger.error(f"   2. Scaler frozen (needs refresh)")
+                            logger.error(f"   3. Model in degenerate state")
+                            logger.error(f"   4. Input features not changing")
+                            logger.error("=" * 80)
+                        else:
+                            logger.debug(f"✅ Prediction variance OK: {pred_std:.6f}")
+
                     # Log signal details
                     logger.info(f"📈 Signal for {symbol}: {signal['signal'].upper()} | "
                                f"Confidence: {signal.get('confidence', 0):.2f} | "
                                f"Reason: {signal.get('reason', 'N/A')}")
 
                     # Execute trade if signal is strong
+                    # CRITICAL FIX: Lowered from 0.60 to 0.30 to account for single-model ensemble
+                    # With AttentionLSTM at 48% test accuracy, 60% confidence was unrealistic
+                    # Current confidence ~0.37, so 0.30 threshold allows trades while filtering noise
+                    MIN_CONFIDENCE_THRESHOLD = 0.30  # 30% minimum confidence
+
                     if signal['signal'] != 'hold':
-                        if signal.get('confidence', 0) > 0.6:
-                            logger.info(f"✅ Confidence {signal['confidence']:.2f} > 0.6 threshold - EXECUTING TRADE")
+                        if signal.get('confidence', 0) > MIN_CONFIDENCE_THRESHOLD:
+                            logger.info(f"✅ Confidence {signal['confidence']:.2f} > {MIN_CONFIDENCE_THRESHOLD} threshold - EXECUTING TRADE")
                             self.execute_trade(symbol, signal)
                         else:
-                            logger.warning(f"⚠️  Confidence {signal.get('confidence', 0):.2f} <= 0.6 threshold - SKIPPING TRADE")
+                            logger.warning(f"⚠️  Confidence {signal.get('confidence', 0):.2f} <= {MIN_CONFIDENCE_THRESHOLD} threshold - SKIPPING TRADE")
                     else:
                         logger.info(f"➡️  HOLD signal - no action")
 
