@@ -36,6 +36,8 @@ from .risk_management.position_sizer import PositionSizer
 from .strategies.self_learning_engine import SelfLearningEngine
 from .strategies.ensemble_strategy import EnsembleStrategy, PerformanceWeightedEnsemble
 from .data.augmentation import TimeSeriesAugmenter
+from .learning.experience_buffer import ExperienceBuffer, TradeExperience
+from .learning.online_trainer import OnlineTrainer, AdaptiveLearningScheduler
 
 
 class MT5TradingBot:
@@ -93,6 +95,11 @@ class MT5TradingBot:
         # Strategy Components
         self.self_learning_engine: Optional[SelfLearningEngine] = None
         self.ensemble_strategy: Optional[EnsembleStrategy] = None
+
+        # TRUE Self-Learning Components (Continuous Weight Updates)
+        self.experience_buffer: Optional['ExperienceBuffer'] = None
+        self.online_trainer: Optional['OnlineTrainer'] = None
+        self.learning_scheduler: Optional['AdaptiveLearningScheduler'] = None
 
         # State
         self.is_running = False
@@ -168,6 +175,32 @@ class MT5TradingBot:
         self.sentiment_analyzer = SentimentAnalyzer(
             model_name=self.config.get('nlp.model_name', 'ProsusAI/finbert')
         )
+
+        # Initialize TRUE Self-Learning components
+        self.experience_buffer = ExperienceBuffer(
+            max_size=10000,
+            buffer_path='data_cache/experience_buffer.json'
+        )
+        self.experience_buffer.load()  # Load previous experiences if available
+
+        self.online_trainer = OnlineTrainer(
+            learning_rate=1e-5,  # Very small for stability
+            max_epochs=3,
+            batch_size=16,
+            ewc_lambda=1000.0,  # Strong regularization against forgetting
+            validation_threshold=0.45,  # Min accuracy to accept update
+            device='cpu'
+        )
+
+        self.learning_scheduler = AdaptiveLearningScheduler(
+            min_time_between_updates=3600,  # 1 hour
+            min_experiences_for_update=50,
+            performance_check_window=20,
+            performance_degradation_threshold=0.10
+        )
+
+        logger.info("✅ TRUE Self-Learning system initialized")
+        logger.info("   Experience buffer, online trainer, and scheduler ready")
 
         logger.info("MT5 Trading Bot initialized successfully")
         logger.info(f"Account: {account_info['login'] if account_info else 'N/A'}")
@@ -726,6 +759,29 @@ class MT5TradingBot:
         signal['self_learning_recommendation'] = sl_signal
         signal['current_price'] = current_price
 
+        # 🎓 TRUE SELF-LEARNING: Record prediction for continuous learning
+        if self.experience_buffer and signal.get('signal') != 'hold':
+            import uuid
+            prediction_id = f"{symbol}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+            # Determine primary model (use ensemble or fallback source)
+            model_name = signal.get('source', 'ensemble')
+
+            self.experience_buffer.add_prediction(
+                prediction_id=prediction_id,
+                symbol=symbol,
+                state=features.flatten() if len(features.shape) > 1 else features,
+                predicted_return=signal.get('prediction', 0.0),
+                predicted_signal=signal.get('signal', 'hold'),
+                confidence=signal.get('confidence', 0.0),
+                model_name=model_name
+            )
+
+            # Attach prediction ID to signal for linking to trade
+            signal['prediction_id'] = prediction_id
+
+            logger.debug(f"📝 Prediction recorded: {prediction_id}")
+
         return signal
 
     def execute_trade(
@@ -836,6 +892,18 @@ class MT5TradingBot:
                 stop_loss=stop_loss,
                 take_profit=take_profit
             )
+
+            # 🎓 TRUE SELF-LEARNING: Link trade to prediction
+            if self.experience_buffer and 'prediction_id' in signal:
+                try:
+                    self.experience_buffer.link_trade_to_prediction(
+                        prediction_id=signal['prediction_id'],
+                        trade_ticket=result.ticket,
+                        entry_price=result.price
+                    )
+                    logger.debug(f"🔗 Trade {result.ticket} linked to prediction {signal['prediction_id']}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to link trade to prediction: {e}")
 
         return result
 
@@ -952,6 +1020,18 @@ class MT5TradingBot:
                             'pnl': pnl,
                             'pnl_pct': pnl_pct
                         })
+
+                        # 🎓 TRUE SELF-LEARNING: Record outcome
+                        if self.experience_buffer:
+                            try:
+                                self.experience_buffer.record_outcome(
+                                    trade_ticket=ticket,
+                                    exit_price=current_price,
+                                    profit_loss=pnl
+                                )
+                                logger.debug(f"📊 Outcome recorded for ticket {ticket}")
+                            except Exception as e:
+                                logger.error(f"❌ Failed to record outcome: {e}")
                     else:
                         logger.error(f"❌ Failed to close position #{ticket}")
                 except Exception as e:
@@ -979,6 +1059,18 @@ class MT5TradingBot:
                 }
                 self.self_learning_engine.record_trade(trade_record)
                 self.position_sizer.update_stats(trade_record)
+
+                # 🎓 TRUE SELF-LEARNING: Record outcome for closed deals
+                if self.experience_buffer and 'ticket' in deal and 'price' in deal:
+                    try:
+                        self.experience_buffer.record_outcome(
+                            trade_ticket=deal['ticket'],
+                            exit_price=deal['price'],
+                            profit_loss=deal['profit']
+                        )
+                        logger.debug(f"📊 Outcome recorded for closed deal {deal['ticket']}")
+                    except Exception as e:
+                        logger.debug(f"Note: Could not record outcome for deal {deal.get('ticket', 'unknown')}: {e}")
 
         return closed_trades
 
@@ -1146,6 +1238,75 @@ class MT5TradingBot:
                 # Monitor positions
                 self.monitor_positions()
 
+                # 🎓 TRUE SELF-LEARNING: Check if models should be fine-tuned
+                if self.experience_buffer and self.online_trainer and self.learning_scheduler:
+                    # Check each model for learning opportunities
+                    models_to_update = {
+                        'LSTM': self.lstm_model,
+                        'GRU': self.gru_model,
+                        'DQL': self.dql_agent
+                    }
+
+                    for model_name, model in models_to_update.items():
+                        if model is None:
+                            continue
+
+                        should_update, reason = self.learning_scheduler.should_update(
+                            model_name=model_name,
+                            experience_buffer=self.experience_buffer
+                        )
+
+                        if should_update:
+                            logger.info("=" * 80)
+                            logger.info(f"🎓 TRIGGERING CONTINUOUS LEARNING FOR {model_name}")
+                            logger.info(f"   Reason: {reason}")
+                            logger.info("=" * 80)
+
+                            try:
+                                # Fine-tune the model
+                                result = self.online_trainer.fine_tune_model(
+                                    model=model,
+                                    experience_buffer=self.experience_buffer,
+                                    model_name=model_name
+                                )
+
+                                if result['status'] == 'success':
+                                    logger.info(f"✅ {model_name} fine-tuned successfully!")
+                                    logger.info(f"   Final accuracy: {result['final_accuracy']:.2%}")
+                                    logger.info(f"   Samples used: {result['samples']}")
+
+                                    # Mark update as completed
+                                    self.learning_scheduler.mark_update_completed(
+                                        model_name=model_name,
+                                        experience_buffer=self.experience_buffer
+                                    )
+
+                                    # Save updated model
+                                    if model_name == 'LSTM' and self.lstm_model:
+                                        self.lstm_model.save(Path('saved_models') / 'lstm_model.pt')
+                                    elif model_name == 'GRU' and self.gru_model:
+                                        self.gru_model.save(Path('saved_models') / 'gru_model.pt')
+                                    elif model_name == 'DQL' and self.dql_agent:
+                                        self.dql_agent.save(Path('saved_models') / 'dql_agent.pt')
+
+                                    logger.info(f"💾 Updated {model_name} saved to disk")
+
+                                elif result['status'] == 'rolled_back':
+                                    logger.warning(f"⚠️  {model_name} update rolled back")
+                                    logger.warning(f"   Reason: {result['reason']}")
+
+                                else:
+                                    logger.info(f"ℹ️  {model_name} update skipped: {result['reason']}")
+
+                            except Exception as e:
+                                logger.error(f"❌ Error during {model_name} fine-tuning: {e}", exc_info=True)
+
+                            logger.info("=" * 80)
+
+                    # Save experience buffer periodically
+                    if datetime.utcnow().minute % 10 == 0:  # Every 10 minutes
+                        self.experience_buffer.save()
+
                 # Log performance periodically
                 if datetime.utcnow().minute == 0:
                     self._log_performance()
@@ -1210,6 +1371,11 @@ class MT5TradingBot:
             self.dql_agent.save(save_dir / 'dql_agent.pt')
         if self.self_learning_engine:
             self.self_learning_engine.save(save_dir / 'learning_state.json')
+
+        # 🎓 TRUE SELF-LEARNING: Save experience buffer
+        if self.experience_buffer:
+            self.experience_buffer.save()
+            logger.info(f"✅ Experience buffer saved ({self.experience_buffer.get_stats()})")
 
         logger.info(f"States saved to {save_dir}")
 
