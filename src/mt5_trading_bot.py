@@ -801,6 +801,9 @@ class MT5TradingBot:
         # Initialize prediction monitoring
         prediction_history = {symbol: [] for symbol in symbols}
 
+        # Initialize trade throttling tracker
+        last_trade_time = {symbol: None for symbol in symbols}
+
         logger.info(f"Starting MT5 trading loop for: {symbols}")
 
         while self.is_running:
@@ -872,8 +875,39 @@ class MT5TradingBot:
 
                     if signal['signal'] != 'hold':
                         if signal.get('confidence', 0) > MIN_CONFIDENCE_THRESHOLD:
-                            logger.info(f"✅ Confidence {signal['confidence']:.2f} > {MIN_CONFIDENCE_THRESHOLD} threshold - EXECUTING TRADE")
-                            self.execute_trade(symbol, signal)
+                            logger.info(f"✅ Confidence {signal['confidence']:.2f} > {MIN_CONFIDENCE_THRESHOLD} threshold")
+
+                            # CRITICAL FIX: Check for duplicate positions before trading
+                            positions = self.mt5_trader.get_positions(symbol=symbol)
+                            if positions and len(positions) > 0:
+                                logger.warning(f"⚠️  SKIPPING TRADE: Already have {len(positions)} open position(s) on {symbol}")
+                                for pos in positions:
+                                    pos_type = pos.get('type', 'UNKNOWN')
+                                    pos_volume = pos.get('volume', 0.0)
+                                    pos_price = pos.get('price_open', 0.0)
+                                    pos_profit = pos.get('profit', 0.0)
+                                    logger.info(f"   📍 Existing: {pos_type} {pos_volume} @ {pos_price:.2f} | P&L: ${pos_profit:.2f}")
+                                continue  # Skip to next symbol
+
+                            # CRITICAL FIX: Trade throttling - minimum time between trades
+                            MIN_TIME_BETWEEN_TRADES = 300  # 5 minutes (300 seconds)
+
+                            if last_trade_time[symbol] is not None:
+                                time_since_last = (datetime.utcnow() - last_trade_time[symbol]).total_seconds()
+                                if time_since_last < MIN_TIME_BETWEEN_TRADES:
+                                    logger.warning(f"⚠️  TRADE THROTTLED: Only {time_since_last:.0f}s since last trade on {symbol}")
+                                    logger.info(f"   Minimum interval: {MIN_TIME_BETWEEN_TRADES}s ({MIN_TIME_BETWEEN_TRADES/60:.1f} minutes)")
+                                    logger.info(f"   Wait: {MIN_TIME_BETWEEN_TRADES - time_since_last:.0f}s more")
+                                    continue  # Skip to next symbol
+
+                            # All checks passed - execute trade
+                            logger.info(f"🚀 EXECUTING TRADE for {symbol}...")
+                            result = self.execute_trade(symbol, signal)
+
+                            # Update last trade time if successful
+                            if result and hasattr(result, 'success') and result.success:
+                                last_trade_time[symbol] = datetime.utcnow()
+                                logger.info(f"✅ Trade executed successfully - throttle timer updated")
                         else:
                             logger.warning(f"⚠️  Confidence {signal.get('confidence', 0):.2f} <= {MIN_CONFIDENCE_THRESHOLD} threshold - SKIPPING TRADE")
                     else:
