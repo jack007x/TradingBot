@@ -743,26 +743,101 @@ class MT5TradingBot:
         return round(lot_size, 2)
 
     def monitor_positions(self) -> List[Dict]:
-        """Monitor and update open positions."""
+        """
+        Monitor and update open positions.
+
+        Enhanced monitoring with:
+        - P&L tracking and alerts
+        - Early exit conditions
+        - Emergency stop-loss
+        - Position lifecycle logging
+        """
         closed_trades = []
         positions = self.mt5_trader.get_positions(magic=self.config.get('mt5.magic_number'))
 
+        if not positions or len(positions) == 0:
+            return closed_trades
+
+        logger.info("=" * 80)
+        logger.info(f"📊 MONITORING {len(positions)} OPEN POSITION(S)")
+        logger.info("=" * 80)
+
         for pos in positions:
             symbol = pos['symbol']
+            ticket = pos.get('ticket', 'N/A')
+            pos_type = pos.get('type', 'UNKNOWN')
+            volume = pos.get('volume', 0.0)
+            price_open = pos.get('price_open', 0.0)
+            price_current = pos.get('price_current', 0.0)
+            sl = pos.get('sl', 0.0)
+            tp = pos.get('tp', 0.0)
+            pnl = pos.get('profit', 0.0)
+
             ticker = self.mt5_data.get_ticker(symbol)
 
             if not ticker:
+                logger.warning(f"⚠️  Cannot get ticker for {symbol} - skipping monitoring")
                 continue
 
-            current_price = ticker['bid'] if pos['type'] == 'buy' else ticker['ask']
+            current_price = ticker['bid'] if pos_type == 'buy' else ticker['ask']
 
-            # Check if position was closed by SL/TP
-            pnl = pos['profit']
-            pnl_pct = pnl / self.risk_manager.current_balance if self.risk_manager.current_balance > 0 else 0
+            # Calculate P&L metrics
+            balance = self.risk_manager.current_balance if self.risk_manager.current_balance > 0 else 10000
+            pnl_pct = (pnl / balance) * 100 if balance > 0 else 0
+
+            # Calculate price movement
+            if price_open > 0:
+                if pos_type == 'buy':
+                    price_change_pct = ((current_price - price_open) / price_open) * 100
+                else:  # sell
+                    price_change_pct = ((price_open - current_price) / price_open) * 100
+            else:
+                price_change_pct = 0
+
+            # Log position status
+            logger.info(f"Position #{ticket} | {symbol} | {pos_type.upper()}")
+            logger.info(f"   Volume: {volume} | Entry: {price_open:.2f} | Current: {current_price:.2f}")
+            logger.info(f"   SL: {sl:.2f} | TP: {tp:.2f}")
+            logger.info(f"   P&L: ${pnl:.2f} ({pnl_pct:+.2f}%) | Price Move: {price_change_pct:+.2f}%")
+
+            # P&L alerts
+            if pnl_pct > 2.0:
+                logger.info(f"   🎉 STRONG PROFIT: {pnl_pct:.2f}% gain!")
+            elif pnl_pct > 1.0:
+                logger.info(f"   ✅ Profitable: {pnl_pct:.2f}% gain")
+            elif pnl_pct < -2.0:
+                logger.warning(f"   🚨 LARGE LOSS: {pnl_pct:.2f}% drawdown!")
+            elif pnl_pct < -1.0:
+                logger.warning(f"   ⚠️  Losing position: {pnl_pct:.2f}% loss")
+            else:
+                logger.info(f"   ➡️  Flat: {pnl_pct:.2f}%")
+
+            # Emergency exit condition - large loss (>5% of account)
+            if pnl_pct < -5.0:
+                logger.error(f"🚨 EMERGENCY EXIT TRIGGERED: Loss exceeds -5% ({pnl_pct:.2f}%)")
+                logger.error(f"   Closing position #{ticket} immediately!")
+
+                try:
+                    close_result = self.mt5_trader.close_position(ticket)
+                    if close_result and hasattr(close_result, 'success') and close_result.success:
+                        logger.info(f"✅ Position #{ticket} closed (emergency exit)")
+                        closed_trades.append({
+                            'ticket': ticket,
+                            'symbol': symbol,
+                            'reason': 'emergency_exit',
+                            'pnl': pnl,
+                            'pnl_pct': pnl_pct
+                        })
+                    else:
+                        logger.error(f"❌ Failed to close position #{ticket}")
+                except Exception as e:
+                    logger.error(f"❌ Error closing position #{ticket}: {e}")
 
             # Record for self-learning
-            if pos['ticket'] not in [t.get('ticket') for t in self.self_learning_engine.trade_history]:
-                self.logger.info(f"Position {pos['ticket']}: {symbol} {pos['type']} PnL: {pnl:.2f}")
+            if ticket not in [t.get('ticket') for t in self.self_learning_engine.trade_history]:
+                logger.debug(f"Recording position #{ticket} for learning engine")
+
+        logger.info("=" * 80)
 
         # Get trade history for learning
         recent_deals = self.mt5_trader.get_trade_history(
