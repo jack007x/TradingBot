@@ -55,10 +55,10 @@ def diagnose():
     print(f"\n📥 TEST 1: Fetching {bars_to_fetch} bars of {symbol}...")
 
     try:
-        df = data_fetcher.fetch_historical_data(
+        df = data_fetcher.fetch_ohlcv(
             symbol=symbol,
-            timeframe=mt5.TIMEFRAME_H1,
-            bars=bars_to_fetch
+            timeframe='1h',
+            count=bars_to_fetch
         )
 
         print(f"✅ Fetched: {len(df)} bars")

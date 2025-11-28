@@ -48,10 +48,10 @@ def diagnose_nan():
     print(f"\n📥 Fetching {bars} bars of {symbol}...")
 
     try:
-        df = data_fetcher.fetch_historical_data(
+        df = data_fetcher.fetch_ohlcv(
             symbol=symbol,
-            timeframe=mt5.TIMEFRAME_H1,
-            bars=bars
+            timeframe='1h',
+            count=bars
         )
     except Exception as e:
         print(f"❌ Failed to fetch data: {e}")

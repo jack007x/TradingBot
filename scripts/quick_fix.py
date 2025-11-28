@@ -92,10 +92,10 @@ def check_data_pipeline(symbol='XAUUSD', bars=310):
     # Fetch data
     print(f"\n📥 Fetching {bars} bars of {symbol}...")
     try:
-        df = data_fetcher.fetch_historical_data(
+        df = data_fetcher.fetch_ohlcv(
             symbol=symbol,
-            timeframe=mt5.TIMEFRAME_H1,
-            bars=bars
+            timeframe='1h',
+            count=bars
         )
         print(f"✅ Fetched: {len(df)} bars")
     except Exception as e:
@@ -184,26 +184,39 @@ def check_models():
         print("   Run training first!")
         return False
 
-    model_files = {
+    # Required model files
+    required_models = {
         'AttentionLSTM': models_dir / 'lstm_model.pt',
         'GRU': models_dir / 'gru_model.pt',
-        'Metrics': models_dir / 'model_metrics.json'
     }
 
-    all_found = True
-    for name, path in model_files.items():
+    # Optional files
+    optional_files = {
+        'Metrics Cache': models_dir / 'model_metrics.json'
+    }
+
+    all_required_found = True
+    for name, path in required_models.items():
         if path.exists():
             size_kb = path.stat().st_size / 1024
             print(f"✅ {name}: {path} ({size_kb:.1f} KB)")
         else:
             print(f"❌ {name}: NOT FOUND")
-            all_found = False
+            all_required_found = False
 
-    if not all_found:
-        print("\n⚠️  Some models missing - run training first!")
+    # Check optional files
+    for name, path in optional_files.items():
+        if path.exists():
+            size_kb = path.stat().st_size / 1024
+            print(f"✅ {name}: {path} ({size_kb:.1f} KB)")
+        else:
+            print(f"⚠️  {name}: NOT FOUND (optional - will be generated)")
+
+    if not all_required_found:
+        print("\n❌ CRITICAL: Required model files missing - run training first!")
         return False
 
-    print("\n✅ All model files found")
+    print("\n✅ All required model files found")
     return True
 
 
