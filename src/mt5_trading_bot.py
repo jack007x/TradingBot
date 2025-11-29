@@ -27,6 +27,7 @@ from .models.neural_networks.directional_predictor import DirectionalPredictor
 from .models.neural_networks.regression_predictor import RegressionPredictor
 from .models.neural_networks.attention_predictor import AttentionRegressionLSTM, AttentionRegressionGRU
 from .models.reinforcement_learning.dql_agent import DQLTradingAgent
+from .models.reinforcement_learning.ppo_agent import PPOTradingAgent
 from .models.reinforcement_learning.trading_env import TradingEnvironment
 from .models.nlp.sentiment_analyzer import SentimentAnalyzer
 from .models.genetic.optimizer import GeneticOptimizer, ParameterRange
@@ -36,6 +37,8 @@ from .risk_management.position_sizer import PositionSizer
 from .strategies.self_learning_engine import SelfLearningEngine
 from .strategies.ensemble_strategy import EnsembleStrategy, PerformanceWeightedEnsemble
 from .data.augmentation import TimeSeriesAugmenter
+from .data.multi_timeframe_features import MultiTimeframeFeatureGenerator
+from .models.regime_detector import MarketRegimeDetector, MarketRegime, RegimeInfo
 from .learning.experience_buffer import ExperienceBuffer, TradeExperience
 from .learning.online_trainer import OnlineTrainer, AdaptiveLearningScheduler
 
@@ -75,6 +78,8 @@ class MT5TradingBot:
 
         # Data Processing
         self.preprocessor = DataPreprocessor()
+        self.mtf_generator: Optional[MultiTimeframeFeatureGenerator] = None
+        self.regime_detector: Optional[MarketRegimeDetector] = None
 
         # AI Models
         self.lstm_model: Optional[LSTMPredictor] = None
@@ -175,6 +180,23 @@ class MT5TradingBot:
         self.sentiment_analyzer = SentimentAnalyzer(
             model_name=self.config.get('nlp.model_name', 'ProsusAI/finbert')
         )
+
+        # Initialize Multi-Timeframe Feature Generator
+        self.mtf_generator = MultiTimeframeFeatureGenerator(
+            timeframes=['M15', 'H1', 'H4', 'D1'],
+            bars_per_tf=100
+        )
+
+        # Initialize Market Regime Detector
+        self.regime_detector = MarketRegimeDetector(
+            adx_threshold=25.0,
+            vol_high_percentile=0.8,
+            vol_low_percentile=0.2,
+            bb_width_threshold=0.02
+        )
+
+        logger.info("✅ Advanced features initialized")
+        logger.info("   Multi-timeframe generator and regime detector ready")
 
         # Initialize TRUE Self-Learning components
         self.experience_buffer = ExperienceBuffer(
@@ -432,6 +454,58 @@ class MT5TradingBot:
         if results['dql']['mean_sharpe'] < 0.5:
             logger.warning(f"DQL Sharpe ratio ({results['dql']['mean_sharpe']:.4f}) below 0.5!")
 
+        # ===========================================
+        # PPO AGENT TRAINING
+        # ===========================================
+        logger.info("=" * 70)
+        logger.info("Training PPO Agent...")
+        logger.info("=" * 70)
+
+        try:
+            # Use same environment as DQL
+            ppo_env = TradingEnvironment(
+                df=df_rl.values,
+                feature_columns=rl_features,
+                window_size=rl_window
+            )
+
+            # Initialize PPO agent
+            self.ppo_agent = PPOTradingAgent(
+                state_size=ppo_env.observation_space.shape[0],
+                action_size=3,  # hold, buy, sell
+                learning_rate=3e-4,
+                gamma=0.99,
+                epsilon=0.2,
+                value_coef=0.5,
+                entropy_coef=0.01
+            )
+
+            # Train PPO
+            logger.info("Training PPO for 100 episodes...")
+            ppo_results = self.ppo_agent.train(
+                env=ppo_env,
+                episodes=100,
+                batch_size=64,
+                update_timestep=2048
+            )
+
+            # Evaluate PPO
+            ppo_eval = self.ppo_agent.evaluate(ppo_env, episodes=10)
+            results['ppo'] = ppo_eval
+
+            logger.info(f"PPO Results: Mean Return={ppo_eval.get('mean_return', 0):.4f}, "
+                       f"Win Rate={ppo_eval.get('mean_win_rate', 0):.2%}, "
+                       f"Sharpe={ppo_eval.get('mean_sharpe', 0):.4f}")
+
+            # Save PPO model
+            self.ppo_agent.save(Path('saved_models') / 'ppo_agent.pt')
+            logger.info("✅ PPO model saved")
+
+        except Exception as e:
+            logger.error(f"❌ PPO training failed: {e}", exc_info=True)
+            logger.warning("Continuing without PPO agent")
+            results['ppo'] = {'mean_return': 0, 'mean_win_rate': 0.5, 'mean_sharpe': 0}
+
         # 🚀 NEW: Setup Performance-Weighted Ensemble (dynamic weighting!)
         logger.info("=" * 70)
         logger.info("🚀 CREATING PERFORMANCE-WEIGHTED ENSEMBLE")
@@ -632,6 +706,36 @@ class MT5TradingBot:
         current_price = ticker['last'] or ticker['bid']
         logger.debug(f"Current price for {symbol}: {current_price}")
 
+        # ===========================================
+        # MARKET REGIME DETECTION
+        # ===========================================
+        regime_info = None
+        if self.regime_detector:
+            try:
+                # Get recent data for regime detection
+                df = self.mt5_data.fetch_ohlcv(symbol, '1h', 200)
+                if df is not None and len(df) > 50:
+                    regime_info = self.regime_detector.detect_regime(df)
+                    logger.info(f"📊 Market Regime: {regime_info.regime.value.upper()}")
+                    logger.info(f"   Confidence: {regime_info.confidence:.2%}")
+                    logger.info(f"   Recommendations: {regime_info.recommendations['entry_strategy']}")
+            except Exception as e:
+                logger.warning(f"⚠️ Regime detection failed: {e}")
+
+        # ===========================================
+        # MULTI-TIMEFRAME FEATURES
+        # ===========================================
+        mtf_features = None
+        if self.mtf_generator:
+            try:
+                mtf_features = self.mtf_generator.generate_features(symbol)
+                if len(mtf_features) > 0:
+                    logger.debug(f"✅ Generated {len(mtf_features)} MTF features")
+                    # Note: MTF features can be used by models that support dynamic input size
+                    # For now, store separately for regime-aware adjustments
+            except Exception as e:
+                logger.warning(f"⚠️ MTF feature generation failed: {e}")
+
         # Get sentiment (if available)
         try:
             news = await self.sentiment_analyzer.fetch_news(symbol)
@@ -697,6 +801,43 @@ class MT5TradingBot:
                     signal['signal'] = new_signal
 
                 logger.info("=" * 80)
+
+        # ===========================================
+        # REGIME-BASED ADJUSTMENTS
+        # ===========================================
+        if regime_info:
+            recommendations = regime_info.recommendations
+
+            # Adjust confidence based on regime
+            original_confidence = signal.get('confidence', 0.0)
+
+            # Reduce confidence for counter-trend signals
+            if regime_info.regime == MarketRegime.TRENDING_UP and signal.get('signal') == 'sell':
+                signal['confidence'] *= 0.6  # Reduce confidence for counter-trend sell
+                logger.info(f"⚠️  Counter-trend SELL in uptrend - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
+
+            elif regime_info.regime == MarketRegime.TRENDING_DOWN and signal.get('signal') == 'buy':
+                signal['confidence'] *= 0.6  # Reduce confidence for counter-trend buy
+                logger.info(f"⚠️  Counter-trend BUY in downtrend - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
+
+            # Boost confidence for trend-following signals
+            elif regime_info.regime == MarketRegime.TRENDING_UP and signal.get('signal') == 'buy':
+                signal['confidence'] = min(signal['confidence'] * 1.2, 1.0)
+                logger.info(f"✅ Trend-following BUY in uptrend - confidence boosted: {original_confidence:.2%} → {signal['confidence']:.2%}")
+
+            elif regime_info.regime == MarketRegime.TRENDING_DOWN and signal.get('signal') == 'sell':
+                signal['confidence'] = min(signal['confidence'] * 1.2, 1.0)
+                logger.info(f"✅ Trend-following SELL in downtrend - confidence boosted: {original_confidence:.2%} → {signal['confidence']:.2%}")
+
+            # Reduce confidence in high volatility
+            elif regime_info.regime == MarketRegime.HIGH_VOLATILITY:
+                signal['confidence'] *= 0.7
+                logger.info(f"⚠️  High volatility regime - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
+
+            # Add regime info to signal
+            signal['regime'] = regime_info.regime.value
+            signal['regime_confidence'] = regime_info.confidence
+            signal['regime_recommendations'] = recommendations
 
         # CRITICAL FIX: Momentum Fallback Strategy
         # If ML models fail (low confidence or all HOLD), use proven technical analysis
@@ -859,6 +1000,22 @@ class MT5TradingBot:
             current_price,
             stop_loss
         )
+
+        # ===========================================
+        # REGIME-BASED POSITION SIZING ADJUSTMENT
+        # ===========================================
+        if signal.get('regime_recommendations'):
+            regime_mult = signal['regime_recommendations'].get('position_size_mult', 1.0)
+            original_size = lot_size
+            lot_size *= regime_mult
+
+            # Ensure we respect min/max lot size
+            lot_size = max(symbol_info['volume_min'], min(symbol_info['volume_max'], lot_size))
+            lot_size = round(lot_size / symbol_info['volume_step']) * symbol_info['volume_step']
+
+            if regime_mult != 1.0:
+                logger.info(f"📊 Regime adjustment: {original_size:.2f} → {lot_size:.2f} lots ({regime_mult:.1f}x)")
+                logger.info(f"   Regime: {signal.get('regime', 'unknown')}")
 
         # Check with risk manager
         can_trade, reason, adjusted_size = self.risk_manager.can_open_position(
