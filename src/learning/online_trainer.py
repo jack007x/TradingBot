@@ -399,12 +399,19 @@ class AdaptiveLearningScheduler:
             if time_since_update < self.min_time_between_updates:
                 return False, f"Too soon (last update {time_since_update:.0f}s ago)"
 
-        # Check 2: Sufficient new experiences
+        # ========================================================================
+        # FIX: Check absolute minimum experiences FIRST (before checking NEW experiences)
+        # This prevents triggering on 0 experiences on first run
+        # ========================================================================
         current_count = len(experience_buffer.completed_experiences)
+        if current_count < self.min_experiences_for_update:
+            return False, f"Insufficient total experiences ({current_count}/{self.min_experiences_for_update})"
+
+        # Check 2: Sufficient NEW experiences (only if we've updated before)
         if model_name in self.last_experience_count:
             new_experiences = current_count - self.last_experience_count[model_name]
             if new_experiences < self.min_experiences_for_update:
-                return False, f"Insufficient experiences ({new_experiences}/{self.min_experiences_for_update})"
+                return False, f"Insufficient new experiences ({new_experiences}/{self.min_experiences_for_update})"
 
         # Check 3: Performance degradation
         perf = experience_buffer.get_model_performance(model_name)

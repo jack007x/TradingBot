@@ -294,6 +294,53 @@ class RegressionPredictor:
         logger.info(f"Input size: {input_size}, Hidden: {hidden_size}, Layers: {num_layers}")
         logger.info(f"Using {loss_fn.upper()} loss for continuous prediction")
 
+    # ========================================================================
+    # PyTorch-like Interface (Delegation to self.model)
+    # ========================================================================
+    # These methods allow RegressionPredictor to be used like nn.Module
+    # for compatibility with OnlineTrainer and other PyTorch-based tools
+
+    def state_dict(self):
+        """Get model state dict. Delegates to internal PyTorch model."""
+        return self.model.state_dict()
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load model state dict. Delegates to internal PyTorch model."""
+        return self.model.load_state_dict(state_dict, strict=strict)
+
+    def parameters(self):
+        """Get model parameters. Delegates to internal PyTorch model."""
+        return self.model.parameters()
+
+    def named_parameters(self):
+        """Get named model parameters. Delegates to internal PyTorch model."""
+        return self.model.named_parameters()
+
+    def train_mode(self):
+        """Set model to training mode."""
+        self.model.train()
+        return self
+
+    def eval_mode(self):
+        """Set model to evaluation mode."""
+        self.model.eval()
+        return self
+
+    def to(self, device):
+        """Move model to device."""
+        self.model = self.model.to(device)
+        self.device = device
+        return self
+
+    def __call__(self, x):
+        """Forward pass - make predictor callable like nn.Module."""
+        return self.model(x)
+
+    def eval(self):
+        """Set evaluation mode."""
+        self.model.eval()
+        return self
+
     def train(
         self,
         X_train: np.ndarray,
