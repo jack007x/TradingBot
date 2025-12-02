@@ -26,22 +26,43 @@ trading:
     - "4h"
     - "1d"
   default_timeframe: "1h"
-  max_open_positions: 5
+  max_open_positions: 3  # REDUCED: Max 3 positions (was 5)
   use_leverage: true
-  max_leverage: 100
+  max_leverage: 50  # REDUCED: Max 50x leverage (was 100x) - safer
   default_lot_size: 0.01
 
+  # === CRITICAL FIX: Trading controls ===
+  min_confidence: 0.55  # Minimum 55% confidence to trade
+  min_trade_interval_seconds: 1800  # 30 minutes between trades per symbol
+  max_trades_per_day: 5  # Maximum 5 trades per day per symbol
+  session_filter_enabled: true  # Enable session filtering for symbols
+
+  # Symbol-specific settings
+  symbol_settings:
+    XAUUSD:  # Gold-specific settings
+      min_sl_atr_mult: 2.5  # Minimum 2.5x ATR for stop loss
+      min_tp_atr_mult: 3.5  # Minimum 3.5x ATR for take profit
+      session_filter: true  # Only trade London/NY sessions
+      avoid_asian_session: true  # Skip Asian session (low liquidity)
+
 # Risk Management
-# CRITICAL FIX: Reduced risk after -7% emergency exit
+# CRITICAL FIX: Reduced risk after losing streak
 # Conservative approach: Lower risk per trade + tighter drawdown limits
 risk:
-  max_risk_per_trade: 0.01  # 1% of portfolio (reduced from 2%)
-  max_daily_drawdown: 0.03  # 3% (reduced from 5%)
-  max_total_drawdown: 0.10  # 10% (reduced from 15%)
-  risk_reward_ratio: 2.0  # Target 2:1 R:R minimum
+  max_risk_per_trade: 0.005  # 0.5% of portfolio (REDUCED from 1%)
+  max_daily_drawdown: 0.02  # 2% daily max (REDUCED from 3%)
+  max_total_drawdown: 0.08  # 8% total max (REDUCED from 10%)
+  risk_reward_ratio: 1.4  # Target 1.4:1 R:R (3.5/2.5 ATR ratio)
   trailing_stop: true
-  trailing_stop_pct: 0.01  # 1%
+  trailing_stop_pct: 0.015  # 1.5% trailing stop
   use_dynamic_position_sizing: true
+
+  # Stop loss and take profit settings
+  stop_loss_atr_multiplier: 2.5  # INCREASED: 2.5x ATR (was 2.0x)
+  take_profit_atr_multiplier: 3.5  # INCREASED: 3.5x ATR (was 3.0x)
+
+  # Emergency exit
+  emergency_exit_threshold: -0.05  # Exit if single trade loses 5% of account
 
 # Neural Network Settings
 neural_networks:
@@ -131,6 +152,13 @@ self_learning:
   strategy_update_threshold: 0.1  # 10% performance change
   save_checkpoints: true
   checkpoint_interval: 86400  # daily
+
+# Ensemble Strategy Settings
+ensemble:
+  min_confidence_for_trade: 0.55  # Minimum ensemble confidence
+  fallback_to_momentum: false  # DISABLED: No momentum fallback (rely on ML only)
+  min_models_agreement: 2  # At least 2 models must agree
+  weight_by_performance: true  # Use performance-weighted ensemble
 
 # Data Settings
 data:

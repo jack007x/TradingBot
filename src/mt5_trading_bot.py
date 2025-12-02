@@ -111,6 +111,16 @@ class MT5TradingBot:
         self.models_trained = False
         self.feature_columns: List[str] = []
 
+        # === CRITICAL FIX: Trade management controls ===
+        self.last_trade_time: Dict[str, datetime] = {}
+        self.signal_history: Dict[str, List[str]] = {}
+        self.min_trade_interval = 1800  # 30 minutes (increased from 5 min)
+        self.min_signal_consistency = 3  # Require 3/5 signals in same direction
+
+        # === CRITICAL FIX: Scaler refresh to prevent model stuck ===
+        self.scaler_fit_time: Dict[str, datetime] = {}
+        self.scaler_refresh_interval = 3600  # Refresh scaler every hour
+
         logger.info(f"MT5TradingBot initialized in {mode} mode")
 
     def initialize(self) -> bool:
@@ -632,14 +642,31 @@ class MT5TradingBot:
 
         logger.info(f"✅ Sufficient data: {len(df)} >= {sequence_length}")
 
+        # CRITICAL FIX: Periodic scaler refresh to prevent model stuck
+        should_refresh_scaler = False
+        if symbol in self.scaler_fit_time:
+            elapsed = (datetime.utcnow() - self.scaler_fit_time[symbol]).total_seconds()
+            if elapsed > self.scaler_refresh_interval:
+                should_refresh_scaler = True
+                logger.info(f"🔄 Scaler refresh triggered for {symbol} (last fit: {elapsed/3600:.1f}h ago)")
+        else:
+            # First time, no scaler yet
+            should_refresh_scaler = True
+
         # Scale data
         try:
-            logger.debug(f"Scaling data...")
-            df_scaled = self.preprocessor.scale_data(df, fit=False, scaler_name=symbol)
-            logger.debug(f"✅ Using existing scaler for {symbol}")
+            if should_refresh_scaler:
+                logger.info(f"🔄 Fitting fresh scaler for {symbol}...")
+                df_scaled = self.preprocessor.scale_data(df, fit=True, scaler_name=symbol)
+                self.scaler_fit_time[symbol] = datetime.utcnow()
+                logger.info(f"✅ Scaler refreshed for {symbol}")
+            else:
+                logger.debug(f"Using existing scaler for {symbol}")
+                df_scaled = self.preprocessor.scale_data(df, fit=False, scaler_name=symbol)
         except ValueError:
             logger.warning(f"⚠️  No scaler found for {symbol}, fitting new one")
             df_scaled = self.preprocessor.scale_data(df, fit=True, scaler_name=symbol)
+            self.scaler_fit_time[symbol] = datetime.utcnow()
 
         numeric_df = df_scaled.select_dtypes(include=[np.number])
         num_features = len(numeric_df.columns)
@@ -839,10 +866,12 @@ class MT5TradingBot:
             signal['regime_confidence'] = regime_info.confidence
             signal['regime_recommendations'] = recommendations
 
-        # CRITICAL FIX: Momentum Fallback Strategy
-        # If ML models fail (low confidence or all HOLD), use proven technical analysis
-        # Gold trends well → momentum strategy is reliable fallback
-        if signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold':
+        # CRITICAL FIX: Momentum Fallback Strategy (DISABLED by default)
+        # Momentum fallback can lead to overtrading - disabled for conservative approach
+        # If enabled in config, will use momentum when ML models have low confidence
+        fallback_enabled = self.config.get('ensemble.fallback_to_momentum', False)
+
+        if fallback_enabled and (signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold'):
             logger.warning("=" * 80)
             logger.warning("⚠️  ML MODELS LOW CONFIDENCE OR HOLD")
             logger.warning(f"   Ensemble: {signal.get('signal')} @ {signal.get('confidence', 0):.2f}")
@@ -887,6 +916,8 @@ class MT5TradingBot:
 
             except Exception as e:
                 logger.error(f"❌ Error in momentum fallback: {e}", exc_info=True)
+        elif not fallback_enabled and (signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold'):
+            logger.info("ℹ️  Low confidence signal - momentum fallback disabled in config, keeping original signal")
 
         # Get self-learning recommendation
         predictions = signal.get('individual_predictions', {})
@@ -965,19 +996,22 @@ class MT5TradingBot:
         # Get ATR for dynamic SL/TP
         atr = self.mt5_data.calculate_atr(symbol, '1h', 14)
 
+        # CRITICAL FIX: Wider SL/TP to survive market noise
+        # Gold volatility requires 2.5x ATR minimum for SL
+        # Using 3.5x ATR for TP to maintain 1.4:1 R:R ratio
         if signal['signal'] == 'buy':
             order_type = 'buy'
             if atr:
-                stop_loss = current_price - (atr * 2)
-                take_profit = current_price + (atr * 3)
+                stop_loss = current_price - (atr * 2.5)  # Wider SL (was 2x)
+                take_profit = current_price + (atr * 3.5)  # Wider TP (was 3x)
             else:
                 stop_loss = current_price * (1 - stop_loss_pct)
                 take_profit = current_price * (1 + take_profit_pct)
         else:
             order_type = 'sell'
             if atr:
-                stop_loss = current_price + (atr * 2)
-                take_profit = current_price - (atr * 3)
+                stop_loss = current_price + (atr * 2.5)  # Wider SL (was 2x)
+                take_profit = current_price - (atr * 3.5)  # Wider TP (was 3x)
             else:
                 stop_loss = current_price * (1 + stop_loss_pct)
                 take_profit = current_price * (1 - take_profit_pct)
@@ -1063,6 +1097,61 @@ class MT5TradingBot:
                     logger.error(f"❌ Failed to link trade to prediction: {e}")
 
         return result
+
+    def can_open_trade(self, symbol: str, signal: str) -> tuple[bool, str]:
+        """
+        Check if we should open a trade (CRITICAL FIX for overtrading).
+
+        Returns:
+            (can_trade, reason)
+        """
+        # Check 1: Trade cooldown (30 minutes minimum)
+        if symbol in self.last_trade_time:
+            elapsed = (datetime.utcnow() - self.last_trade_time[symbol]).total_seconds()
+            if elapsed < self.min_trade_interval:
+                remaining = self.min_trade_interval - elapsed
+                return False, f"Cooldown: {remaining:.0f}s remaining ({remaining/60:.1f} min)"
+
+        # Check 2: Signal consistency (prevent flip-flop)
+        if symbol not in self.signal_history:
+            self.signal_history[symbol] = []
+
+        self.signal_history[symbol].append(signal)
+        if len(self.signal_history[symbol]) > 5:
+            self.signal_history[symbol].pop(0)
+
+        if len(self.signal_history[symbol]) >= 5:
+            signal_count = self.signal_history[symbol].count(signal)
+            if signal_count < self.min_signal_consistency:
+                recent_signals = ', '.join(self.signal_history[symbol][-5:])
+                return False, f"Inconsistent: only {signal_count}/5 {signal.upper()} signals (recent: {recent_signals})"
+        else:
+            # Not enough history yet, allow trade but warn
+            logger.info(f"   Signal history building: {len(self.signal_history[symbol])}/5 samples")
+
+        # Check 3: Regime alignment (prevent counter-trend trades)
+        if hasattr(self, 'regime_detector') and self.regime_detector:
+            try:
+                # Get recent data for quick regime check
+                df = self.mt5_data.fetch_ohlcv(symbol, '1h', 100)
+                if df is not None and len(df) > 50:
+                    regime_info = self.regime_detector.detect_regime(df)
+                    regime = regime_info.regime.value
+
+                    # Block counter-trend trades in strong trending markets
+                    if regime == 'trending_up' and signal == 'sell':
+                        return False, f"Regime mismatch: {regime.upper()} but signal is SELL (confidence: {regime_info.confidence:.0%})"
+                    if regime == 'trending_down' and signal == 'buy':
+                        return False, f"Regime mismatch: {regime.upper()} but signal is BUY (confidence: {regime_info.confidence:.0%})"
+            except Exception as e:
+                logger.debug(f"Regime check failed (non-critical): {e}")
+
+        return True, "OK"
+
+    def record_trade(self, symbol: str) -> None:
+        """Record that a trade was executed (for cooldown tracking)."""
+        self.last_trade_time[symbol] = datetime.utcnow()
+        logger.debug(f"🕐 Trade recorded for {symbol} at {datetime.utcnow()}")
 
     def _calculate_lot_size(
         self,
@@ -1346,11 +1435,10 @@ class MT5TradingBot:
                             continue  # Skip to next symbol
 
                     # Execute trade if signal is strong
-                    # CRITICAL FIX: Raised from 0.30 to 0.50 to reduce overtrading
-                    # After emergency exit at -7%, we need higher quality signals
-                    # 50% threshold balances opportunity vs risk management
-                    # Target: Win rate 55-60% with R:R 2:1 = profitable
-                    MIN_CONFIDENCE_THRESHOLD = 0.50  # 50% minimum confidence
+                    # CRITICAL FIX: Raised from 0.30 to 0.55 to reduce overtrading
+                    # Higher threshold ensures only high-confidence signals are traded
+                    # Target: Win rate 55-60% with R:R 2.5:1 = profitable
+                    MIN_CONFIDENCE_THRESHOLD = 0.55  # 55% minimum confidence
 
                     if signal['signal'] != 'hold':
                         if signal.get('confidence', 0) > MIN_CONFIDENCE_THRESHOLD:
@@ -1368,25 +1456,21 @@ class MT5TradingBot:
                                     logger.info(f"   📍 Existing: {pos_type} {pos_volume} @ {pos_price:.2f} | P&L: ${pos_profit:.2f}")
                                 continue  # Skip to next symbol
 
-                            # CRITICAL FIX: Trade throttling - minimum time between trades
-                            MIN_TIME_BETWEEN_TRADES = 300  # 5 minutes (300 seconds)
-
-                            if last_trade_time[symbol] is not None:
-                                time_since_last = (datetime.utcnow() - last_trade_time[symbol]).total_seconds()
-                                if time_since_last < MIN_TIME_BETWEEN_TRADES:
-                                    logger.warning(f"⚠️  TRADE THROTTLED: Only {time_since_last:.0f}s since last trade on {symbol}")
-                                    logger.info(f"   Minimum interval: {MIN_TIME_BETWEEN_TRADES}s ({MIN_TIME_BETWEEN_TRADES/60:.1f} minutes)")
-                                    logger.info(f"   Wait: {MIN_TIME_BETWEEN_TRADES - time_since_last:.0f}s more")
-                                    continue  # Skip to next symbol
+                            # CRITICAL FIX: Enhanced trade validation (cooldown + consistency + regime)
+                            can_trade, reason = self.can_open_trade(symbol, signal['signal'])
+                            if not can_trade:
+                                logger.warning(f"⚠️  TRADE BLOCKED: {reason}")
+                                continue  # Skip to next symbol
 
                             # All checks passed - execute trade
                             logger.info(f"🚀 EXECUTING TRADE for {symbol}...")
+                            logger.info(f"   ✅ All pre-trade checks passed: {reason}")
                             result = self.execute_trade(symbol, signal)
 
                             # Update last trade time if successful
                             if result and hasattr(result, 'success') and result.success:
-                                last_trade_time[symbol] = datetime.utcnow()
-                                logger.info(f"✅ Trade executed successfully - throttle timer updated")
+                                self.record_trade(symbol)
+                                logger.info(f"✅ Trade executed successfully - 30-min cooldown started")
                         else:
                             logger.warning(f"⚠️  Confidence {signal.get('confidence', 0):.2f} <= {MIN_CONFIDENCE_THRESHOLD} threshold - SKIPPING TRADE")
                     else:
