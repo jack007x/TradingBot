@@ -41,6 +41,11 @@ from .data.multi_timeframe_features import MultiTimeframeFeatureGenerator
 from .models.regime_detector import MarketRegimeDetector, MarketRegime, RegimeInfo
 from .learning.experience_buffer import ExperienceBuffer, TradeExperience
 from .learning.online_trainer import OnlineTrainer, AdaptiveLearningScheduler
+from .strategies.advanced_pipeline import (
+    HybridSignalGenerator,
+    HybridSignal,
+    ModelHealthMonitor
+)
 
 
 class MT5TradingBot:
@@ -120,6 +125,10 @@ class MT5TradingBot:
         # === CRITICAL FIX: Scaler refresh to prevent model stuck ===
         self.scaler_fit_time: Dict[str, datetime] = {}
         self.scaler_refresh_interval = 3600  # Refresh scaler every hour
+
+        # === V2.0: Hybrid Signal Generator (ML + TA) ===
+        self.hybrid_signal_gen: Optional[HybridSignalGenerator] = None
+        self.current_balance = 10000  # Will be updated from MT5 account info
 
         logger.info(f"MT5TradingBot initialized in {mode} mode")
 
@@ -233,6 +242,19 @@ class MT5TradingBot:
 
         logger.info("✅ TRUE Self-Learning system initialized")
         logger.info("   Experience buffer, online trainer, and scheduler ready")
+
+        # Initialize V2.0 Hybrid Signal Generator
+        self.hybrid_signal_gen = HybridSignalGenerator(
+            ml_weight=self.config.get('ensemble.ml_weight', 0.6),
+            ta_weight=self.config.get('ensemble.ta_weight', 0.4),
+            min_confidence=self.config.get('trading.min_confidence', 0.55)
+        )
+        logger.info("✅ Hybrid Signal Generator v2.0 initialized")
+        logger.info("   ML+TA fusion with model health monitoring enabled")
+
+        # Update current balance
+        if account_info:
+            self.current_balance = account_info['balance']
 
         logger.info("MT5 Trading Bot initialized successfully")
         logger.info(f"Account: {account_info['login'] if account_info else 'N/A'}")
@@ -699,7 +721,7 @@ class MT5TradingBot:
 
     async def get_trading_signal(self, symbol: str) -> Dict:
         """
-        Get trading signal for a symbol.
+        Get trading signal using Hybrid ML+TA system (v2.0).
 
         Args:
             symbol: Trading symbol
@@ -707,254 +729,124 @@ class MT5TradingBot:
         Returns:
             Trading signal with analysis
         """
-        if not self.models_trained:
-            logger.warning(f"❌ Models not trained - returning HOLD")
-            return {'signal': 'hold', 'reason': 'Models not trained', 'confidence': 0.0}
+        if not self.models_trained and not self.hybrid_signal_gen:
+            logger.warning(f"❌ Bot not initialized - returning HOLD")
+            return {'signal': 'hold', 'reason': 'Bot not initialized', 'confidence': 0.0}
 
-        # Get features
-        logger.debug(f"Fetching features for {symbol}...")
-        features = self.get_realtime_features(
-            symbol,
-            sequence_length=self.config.neural_network.lstm_sequence_length
-        )
-
-        if features is None:
+        # Get OHLCV data for TA analysis
+        df = self.mt5_data.fetch_ohlcv(symbol, '1h', 200)
+        if df is None or len(df) < 100:
             logger.warning(f"❌ Insufficient data for {symbol} - returning HOLD")
             return {'signal': 'hold', 'reason': 'Insufficient data', 'confidence': 0.0}
 
-        logger.debug(f"✅ Features shape: {features.shape}")
+        current_price = df['close'].iloc[-1]
 
-        # Get current price
-        ticker = self.mt5_data.get_ticker(symbol)
-        if not ticker:
-            logger.warning(f"❌ Cannot get price for {symbol} - returning HOLD")
-            return {'signal': 'hold', 'reason': 'Cannot get price', 'confidence': 0.0}
+        # Get ML predictions from all models (if models trained)
+        ml_predictions = {}
 
-        current_price = ticker['last'] or ticker['bid']
-        logger.debug(f"Current price for {symbol}: {current_price}")
-
-        # ===========================================
-        # MARKET REGIME DETECTION
-        # ===========================================
-        regime_info = None
-        if self.regime_detector:
-            try:
-                # Get recent data for regime detection
-                df = self.mt5_data.fetch_ohlcv(symbol, '1h', 200)
-                if df is not None and len(df) > 50:
-                    regime_info = self.regime_detector.detect_regime(df)
-                    logger.info(f"📊 Market Regime: {regime_info.regime.value.upper()}")
-                    logger.info(f"   Confidence: {regime_info.confidence:.2%}")
-                    logger.info(f"   Recommendations: {regime_info.recommendations['entry_strategy']}")
-            except Exception as e:
-                logger.warning(f"⚠️ Regime detection failed: {e}")
-
-        # ===========================================
-        # MULTI-TIMEFRAME FEATURES
-        # ===========================================
-        mtf_features = None
-        if self.mtf_generator:
-            try:
-                mtf_features = self.mtf_generator.generate_features(symbol)
-                if len(mtf_features) > 0:
-                    logger.debug(f"✅ Generated {len(mtf_features)} MTF features")
-                    # Note: MTF features can be used by models that support dynamic input size
-                    # For now, store separately for regime-aware adjustments
-            except Exception as e:
-                logger.warning(f"⚠️ MTF feature generation failed: {e}")
-
-        # Get sentiment (if available)
-        try:
-            news = await self.sentiment_analyzer.fetch_news(symbol)
-            sentiment_data = self.sentiment_analyzer.get_market_sentiment(news)
-        except Exception:
-            sentiment_data = None
-
-        # Get ensemble signal
-        try:
-            logger.info(f"🔮 Getting ensemble prediction for {symbol}...")
-            signal = self.ensemble_strategy.get_trading_signal(
-                features=features,
-                sentiment_data=sentiment_data,
-                current_price=current_price
+        if self.models_trained:
+            features = self.get_realtime_features(
+                symbol,
+                sequence_length=self.config.neural_network.lstm_sequence_length
             )
-            logger.info(f"✅ Ensemble prediction successful")
-        except Exception as e:
-            logger.error(f"❌ Error getting ensemble signal: {e}", exc_info=True)
-            return {'signal': 'hold', 'reason': f'Ensemble error: {str(e)}', 'confidence': 0.0}
 
-        # SENTIMENT INTEGRATION: Adjust prediction by news sentiment
-        if sentiment_data:
-            sentiment_signal = 0.0
+            if features is not None:
+                # Collect predictions from available models
+                models = {
+                    'LSTM': self.lstm_model,
+                    'GRU': self.gru_model,
+                    'DQL': self.dql_agent
+                }
 
-            # Convert sentiment to trading signal adjustment
-            if sentiment_data.get('sentiment') == 'bullish':
-                sentiment_signal = sentiment_data.get('confidence', 0) * 0.005  # +0.5% boost
-            elif sentiment_data.get('sentiment') == 'bearish':
-                sentiment_signal = -sentiment_data.get('confidence', 0) * 0.005  # -0.5% penalty
+                for name, model in models.items():
+                    if model is None:
+                        continue
 
-            if sentiment_signal != 0:
-                logger.info("=" * 80)
-                logger.info("📰 NEWS SENTIMENT ANALYSIS")
-                logger.info("=" * 80)
-                logger.info(f"   Sentiment: {sentiment_data.get('sentiment', 'neutral').upper()}")
-                logger.info(f"   Confidence: {sentiment_data.get('confidence', 0):.2f}")
-                logger.info(f"   Bullish news: {sentiment_data.get('bullish_count', 0)}")
-                logger.info(f"   Bearish news: {sentiment_data.get('bearish_count', 0)}")
-                logger.info(f"   Neutral news: {sentiment_data.get('neutral_count', 0)}")
+                    try:
+                        pred = model.predict(features)
+                        pred_value = float(pred.flatten()[0]) if hasattr(pred, 'flatten') else float(pred)
 
-                # Adjust ensemble prediction
-                original_pred = signal.get('prediction', 0.0)
-                adjusted_pred = original_pred + (sentiment_signal * 0.2)  # 20% weight to sentiment
+                        # Convert prediction to signal
+                        if pred_value > 0.001:
+                            ml_predictions[name] = ('buy', min(abs(pred_value) * 100, 1.0))
+                        elif pred_value < -0.001:
+                            ml_predictions[name] = ('sell', min(abs(pred_value) * 100, 1.0))
+                        else:
+                            ml_predictions[name] = ('hold', 0.5)
 
-                logger.info(f"   Original prediction: {original_pred:+.4f}")
-                logger.info(f"   Sentiment adjustment: {sentiment_signal:+.4f} × 0.2 = {sentiment_signal * 0.2:+.4f}")
-                logger.info(f"   Adjusted prediction: {adjusted_pred:+.4f}")
+                        logger.debug(f"   {name}: {ml_predictions[name][0]} @ {ml_predictions[name][1]:.2%}")
 
-                signal['prediction'] = adjusted_pred
-                signal['sentiment_adjusted'] = True
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ {name} prediction failed: {e}")
+            else:
+                logger.warning("⚠️ Feature extraction failed - using TA-only mode")
+        else:
+            logger.info("ℹ️ Models not trained - using TA-only mode")
 
-                # Recalculate signal if threshold crossed
-                signal_threshold = 0.0008
-                if adjusted_pred > signal_threshold:
-                    new_signal = 'buy'
-                elif adjusted_pred < -signal_threshold:
-                    new_signal = 'sell'
-                else:
-                    new_signal = 'hold'
+        # Update balance from account
+        account_info = self.mt5_connector.get_account_info()
+        if account_info:
+            self.current_balance = account_info['balance']
 
-                if new_signal != signal.get('signal'):
-                    logger.info(f"   Signal changed: {signal.get('signal')} → {new_signal}")
-                    signal['signal'] = new_signal
-
-                logger.info("=" * 80)
-
-        # ===========================================
-        # REGIME-BASED ADJUSTMENTS
-        # ===========================================
-        if regime_info:
-            recommendations = regime_info.recommendations
-
-            # Adjust confidence based on regime
-            original_confidence = signal.get('confidence', 0.0)
-
-            # Reduce confidence for counter-trend signals
-            if regime_info.regime == MarketRegime.TRENDING_UP and signal.get('signal') == 'sell':
-                signal['confidence'] *= 0.6  # Reduce confidence for counter-trend sell
-                logger.info(f"⚠️  Counter-trend SELL in uptrend - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
-
-            elif regime_info.regime == MarketRegime.TRENDING_DOWN and signal.get('signal') == 'buy':
-                signal['confidence'] *= 0.6  # Reduce confidence for counter-trend buy
-                logger.info(f"⚠️  Counter-trend BUY in downtrend - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
-
-            # Boost confidence for trend-following signals
-            elif regime_info.regime == MarketRegime.TRENDING_UP and signal.get('signal') == 'buy':
-                signal['confidence'] = min(signal['confidence'] * 1.2, 1.0)
-                logger.info(f"✅ Trend-following BUY in uptrend - confidence boosted: {original_confidence:.2%} → {signal['confidence']:.2%}")
-
-            elif regime_info.regime == MarketRegime.TRENDING_DOWN and signal.get('signal') == 'sell':
-                signal['confidence'] = min(signal['confidence'] * 1.2, 1.0)
-                logger.info(f"✅ Trend-following SELL in downtrend - confidence boosted: {original_confidence:.2%} → {signal['confidence']:.2%}")
-
-            # Reduce confidence in high volatility
-            elif regime_info.regime == MarketRegime.HIGH_VOLATILITY:
-                signal['confidence'] *= 0.7
-                logger.info(f"⚠️  High volatility regime - confidence reduced: {original_confidence:.2%} → {signal['confidence']:.2%}")
-
-            # Add regime info to signal
-            signal['regime'] = regime_info.regime.value
-            signal['regime_confidence'] = regime_info.confidence
-            signal['regime_recommendations'] = recommendations
-
-        # CRITICAL FIX: Momentum Fallback Strategy (DISABLED by default)
-        # Momentum fallback can lead to overtrading - disabled for conservative approach
-        # If enabled in config, will use momentum when ML models have low confidence
-        fallback_enabled = self.config.get('ensemble.fallback_to_momentum', False)
-
-        if fallback_enabled and (signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold'):
-            logger.warning("=" * 80)
-            logger.warning("⚠️  ML MODELS LOW CONFIDENCE OR HOLD")
-            logger.warning(f"   Ensemble: {signal.get('signal')} @ {signal.get('confidence', 0):.2f}")
-            logger.warning("   Falling back to MOMENTUM STRATEGY...")
-            logger.warning("=" * 80)
-
-            try:
-                from src.strategies.simple_momentum import SimpleMomentumStrategy
-
-                # Initialize momentum strategy
-                momentum = SimpleMomentumStrategy()
-
-                # Get recent data with indicators
-                df = self.mt5_data.fetch_ohlcv(symbol, '1h', 100)
-                if df is not None and len(df) > 50:
-                    df = self.preprocessor.add_technical_indicators(df)
-                    df = df.dropna()
-
-                    # Get momentum signal
-                    momentum_signal = momentum.get_signal(df)
-
-                    logger.info(f"📊 Momentum signal: {momentum_signal['signal'].upper()} "
-                              f"@ {momentum_signal['confidence']:.2f}")
-                    logger.info(f"   Reasons: {', '.join(momentum_signal.get('reasons', []))}")
-
-                    # Use momentum if it has higher confidence than ensemble
-                    if momentum_signal['confidence'] > signal.get('confidence', 0):
-                        logger.info("✅ Using MOMENTUM signal (higher confidence)")
-                        signal = {
-                            'signal': momentum_signal['signal'],
-                            'confidence': momentum_signal['confidence'],
-                            'reason': 'Momentum: ' + ', '.join(momentum_signal.get('reasons', [])),
-                            'source': 'momentum_fallback',
-                            'buy_score': momentum_signal.get('buy_score', 0),
-                            'sell_score': momentum_signal.get('sell_score', 0),
-                            'prediction': 0.01 if momentum_signal['signal'] == 'buy' else -0.01 if momentum_signal['signal'] == 'sell' else 0
-                        }
-                    else:
-                        logger.warning("⚠️  Momentum also low confidence - keeping HOLD")
-                else:
-                    logger.warning("⚠️  Insufficient data for momentum strategy")
-
-            except Exception as e:
-                logger.error(f"❌ Error in momentum fallback: {e}", exc_info=True)
-        elif not fallback_enabled and (signal.get('confidence', 0) < 0.3 or signal.get('signal') == 'hold'):
-            logger.info("ℹ️  Low confidence signal - momentum fallback disabled in config, keeping original signal")
-
-        # Get self-learning recommendation
-        predictions = signal.get('individual_predictions', {})
-        sl_signal = self.self_learning_engine.suggest_action(
-            predictions={
-                k: {'signal': v.get('signal', 'hold'), 'confidence': v.get('confidence', 0.5)}
-                for k, v in predictions.items()
-            },
+        # Generate hybrid signal using v2.0 system
+        hybrid_signal = self.hybrid_signal_gen.generate_signal(
+            df=df,
+            ml_predictions=ml_predictions,
+            balance=self.current_balance,
             current_price=current_price
         )
-        signal['self_learning_recommendation'] = sl_signal
-        signal['current_price'] = current_price
+
+        # Log the hybrid signal
+        self.hybrid_signal_gen.log_signal(hybrid_signal)
+
+        # Record trade if signal generated (for guard tracking)
+        if hybrid_signal.signal != 'hold':
+            self.hybrid_signal_gen.trade_guard.record_signal(hybrid_signal.signal)
+
+        # Convert HybridSignal to dict format expected by bot
+        signal_dict = {
+            'signal': hybrid_signal.signal,
+            'confidence': hybrid_signal.confidence,
+            'strength': hybrid_signal.strength.value,
+            'ml_signal': hybrid_signal.ml_signal,
+            'ml_confidence': hybrid_signal.ml_confidence,
+            'ta_signal': hybrid_signal.ta_signal,
+            'ta_confidence': hybrid_signal.ta_confidence,
+            'trend_direction': hybrid_signal.trend_direction.value,
+            'trend_strength': hybrid_signal.trend_strength,
+            'regime': hybrid_signal.regime,
+            'entry_price': hybrid_signal.entry_price,
+            'stop_loss': hybrid_signal.stop_loss,
+            'take_profit': hybrid_signal.take_profit,
+            'position_size': hybrid_signal.position_size,
+            'risk_reward_ratio': hybrid_signal.risk_reward_ratio,
+            'current_price': current_price,
+            'confirmations': hybrid_signal.confirmations,
+            'warnings': hybrid_signal.warnings,
+            'reasons': hybrid_signal.reasons,
+            'prediction': hybrid_signal.ml_confidence if hybrid_signal.ml_signal == 'buy' else -hybrid_signal.ml_confidence if hybrid_signal.ml_signal == 'sell' else 0.0,
+            'source': 'hybrid_v2'
+        }
 
         # 🎓 TRUE SELF-LEARNING: Record prediction for continuous learning
-        if self.experience_buffer and signal.get('signal') != 'hold':
+        if self.experience_buffer and hybrid_signal.signal != 'hold':
             import uuid
             prediction_id = f"{symbol}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-            # Determine primary model (use ensemble or fallback source)
-            model_name = signal.get('source', 'ensemble')
 
             self.experience_buffer.add_prediction(
                 prediction_id=prediction_id,
                 symbol=symbol,
-                state=features.flatten() if len(features.shape) > 1 else features,
-                predicted_return=signal.get('prediction', 0.0),
-                predicted_signal=signal.get('signal', 'hold'),
-                confidence=signal.get('confidence', 0.0),
-                model_name=model_name
+                state=np.array([hybrid_signal.ml_confidence, hybrid_signal.ta_confidence, hybrid_signal.trend_strength]),
+                predicted_return=signal_dict['prediction'],
+                predicted_signal=hybrid_signal.signal,
+                confidence=hybrid_signal.confidence,
+                model_name='hybrid_v2'
             )
 
-            # Attach prediction ID to signal for linking to trade
-            signal['prediction_id'] = prediction_id
-
+            signal_dict['prediction_id'] = prediction_id
             logger.debug(f"📝 Prediction recorded: {prediction_id}")
 
-        return signal
+        return signal_dict
 
     def execute_trade(
         self,
