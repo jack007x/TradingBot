@@ -120,9 +120,29 @@ def mode_fetch_data(config, args, logger):
     # Connect and fetch
     if not fetcher.connect():
         logger.warning("Could not connect to MT5, using demo data")
+    else:
+        # Try to find the correct gold symbol
+        gold_symbol = fetcher.find_gold_symbol()
+        if gold_symbol and gold_symbol != config.trading.symbol:
+            logger.info(f"Using symbol '{gold_symbol}' instead of '{config.trading.symbol}'")
+            fetcher.symbol = gold_symbol
+
+        # Show available gold-related symbols
+        available = fetcher.list_available_symbols("XAU")
+        if available:
+            logger.info(f"Available gold symbols: {available}")
 
     df = fetcher.fetch_historical(start_date, end_date)
     logger.info(f"Fetched {len(df)} bars")
+
+    if df.empty:
+        logger.error("No data fetched! Check MT5 connection and symbol availability.")
+        logger.info("Possible causes:")
+        logger.info("  1. MT5 terminal not running or not logged in")
+        logger.info("  2. Symbol 'XAUUSD' not available (try 'GOLD' or broker-specific name)")
+        logger.info("  3. No historical data available for the requested period")
+        fetcher.disconnect()
+        return
 
     # Validate
     is_valid, issues = validator.validate(df)
@@ -136,7 +156,8 @@ def mode_fetch_data(config, args, logger):
     # Print info
     info = store.get_data_info()
     logger.info(f"Data saved: {info['rows']} bars")
-    logger.info(f"Date range: {info['first_date']} to {info['last_date']}")
+    if info.get('first_date') and info.get('last_date'):
+        logger.info(f"Date range: {info['first_date']} to {info['last_date']}")
 
     fetcher.disconnect()
 

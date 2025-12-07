@@ -172,22 +172,32 @@ class DataFetcher:
         if end_date is None:
             end_date = datetime.now()
 
-        logger.info(f"Fetching {self.symbol} {self.timeframe} data: {start_date} to {end_date}")
+        # Clean datetime objects for MT5 (remove microseconds, ensure naive datetime)
+        start_date_clean = datetime(
+            start_date.year, start_date.month, start_date.day,
+            start_date.hour, start_date.minute, 0
+        )
+        end_date_clean = datetime(
+            end_date.year, end_date.month, end_date.day,
+            end_date.hour, end_date.minute, 0
+        )
+
+        logger.info(f"Fetching {self.symbol} {self.timeframe} data: {start_date_clean} to {end_date_clean}")
 
         if not MT5_AVAILABLE:
             logger.warning("MT5 not available, generating demo data")
-            return self._generate_demo_data(start_date, end_date)
+            return self._generate_demo_data(start_date_clean, end_date_clean)
 
         if not self._connected:
             if not self.connect():
                 raise ConnectionError("Failed to connect to MT5")
 
-        # Fetch data from MT5
+        # Fetch data from MT5 using cleaned datetime
         rates = mt5.copy_rates_range(
             self.symbol,
             self.mt5_timeframe,
-            start_date,
-            end_date
+            start_date_clean,
+            end_date_clean
         )
 
         if rates is None or len(rates) == 0:
@@ -292,6 +302,84 @@ class DataFetcher:
 
         spread_points = (tick.ask - tick.bid) * 100  # For gold, 1 pip = 0.01
         return tick.bid, tick.ask, spread_points
+
+    def find_gold_symbol(self) -> Optional[str]:
+        """
+        Try to find the gold symbol in the broker.
+
+        Different brokers use different names: XAUUSD, GOLD, XAUUSDm, etc.
+
+        Returns:
+            str: Found symbol name or None
+        """
+        if not MT5_AVAILABLE:
+            return "XAUUSD"
+
+        if not self._connected:
+            if not self.connect():
+                return None
+
+        # Common gold symbol names
+        possible_names = [
+            "XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.raw", "XAUUSD.",
+            "GOLDm", "GOLD.raw", "XAU/USD", "XAUUSDpro"
+        ]
+
+        # Get all symbols
+        symbols = mt5.symbols_get()
+        if symbols is None:
+            return None
+
+        symbol_names = [s.name for s in symbols]
+
+        # Try exact match first
+        for name in possible_names:
+            if name in symbol_names:
+                logger.info(f"Found gold symbol: {name}")
+                return name
+
+        # Try partial match
+        for sym in symbol_names:
+            if "XAU" in sym.upper() or "GOLD" in sym.upper():
+                logger.info(f"Found gold symbol (partial match): {sym}")
+                return sym
+
+        # Log available symbols for debugging
+        logger.warning("Could not find gold symbol. Available symbols with 'XAU' or 'GOLD':")
+        for sym in symbol_names:
+            if "XAU" in sym.upper() or "GOLD" in sym.upper():
+                logger.warning(f"  - {sym}")
+
+        return None
+
+    def list_available_symbols(self, filter_text: str = "") -> list:
+        """
+        List available trading symbols.
+
+        Args:
+            filter_text: Filter symbols containing this text
+
+        Returns:
+            list: Available symbol names
+        """
+        if not MT5_AVAILABLE:
+            return ["XAUUSD"]
+
+        if not self._connected:
+            if not self.connect():
+                return []
+
+        symbols = mt5.symbols_get()
+        if symbols is None:
+            return []
+
+        names = [s.name for s in symbols if s.visible]
+
+        if filter_text:
+            filter_upper = filter_text.upper()
+            names = [n for n in names if filter_upper in n.upper()]
+
+        return sorted(names)
 
     def get_symbol_info(self) -> dict:
         """
