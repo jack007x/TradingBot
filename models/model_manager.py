@@ -149,7 +149,7 @@ class ModelManager:
         logger.info(f"Loaded model from {model_path}")
 
         # Load metadata
-        metadata_path = model_path.with_suffix('').with_suffix(f"{self.metadata_suffix}")
+        metadata_path = model_path.parent / (model_path.stem + self.metadata_suffix)
         if metadata_path.exists():
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
@@ -236,7 +236,7 @@ class ModelManager:
                 continue
 
             # Load metadata if available
-            metadata_path = model_file.with_suffix('').with_suffix(f"{self.metadata_suffix}")
+            metadata_path = model_file.parent / (model_file.stem + self.metadata_suffix)
             if metadata_path.exists():
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
@@ -334,7 +334,7 @@ class ModelManager:
             # Delete models beyond keep count
             for model in models[keep_count:]:
                 model_path = Path(model['path'])
-                metadata_path = model_path.with_suffix('').with_suffix(f"{self.metadata_suffix}")
+                metadata_path = model_path.parent / (model_path.stem + self.metadata_suffix)
 
                 try:
                     model_path.unlink()

@@ -428,11 +428,21 @@ class Backtester:
         if len(trades) == 0:
             return {
                 'total_trades': 0,
-                'total_return': 0,
-                'sharpe_ratio': 0,
-                'max_drawdown': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
                 'win_rate': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'avg_win': 0,
+                'avg_loss': 0,
                 'profit_factor': 0,
+                'total_return': 0,
+                'total_return_pct': 0,
+                'max_drawdown': 0,
+                'max_drawdown_pct': 0,
+                'sharpe_ratio': 0,
+                'calmar_ratio': 0,
+                'avg_trade_duration_hours': 0,
             }
 
         # Trade statistics
