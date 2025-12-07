@@ -200,60 +200,65 @@ class DataFetcher:
         trading_days = int(total_days * 5 / 7)  # Approximate trading days
         estimated_bars = trading_days * bars_per_day
 
-        # MT5 has limits, fetch in chunks if needed
-        max_bars_per_request = 100000
+        # MT5 has practical limit around 50k bars per request
+        chunk_size = 50000
 
         logger.info(f"Estimated bars needed: {estimated_bars}")
 
-        # Try copy_rates_from_pos first (more reliable)
-        # This fetches N bars back from current time
-        if estimated_bars <= max_bars_per_request:
+        all_rates = []
+        position = 0
+
+        # Fetch data in chunks using copy_rates_from_pos
+        while position < estimated_bars:
+            bars_to_fetch = min(chunk_size, estimated_bars - position + 1000)
+
+            logger.info(f"Fetching chunk: position={position}, bars={bars_to_fetch}")
+
             rates = mt5.copy_rates_from_pos(
                 self.symbol,
                 self.mt5_timeframe,
-                0,  # Start from current bar
-                min(estimated_bars + 1000, max_bars_per_request)  # Add buffer
-            )
-        else:
-            # For very large requests, use copy_rates_range in chunks
-            logger.info(f"Large request, fetching {estimated_bars} bars...")
-            rates = mt5.copy_rates_from_pos(
-                self.symbol,
-                self.mt5_timeframe,
-                0,
-                max_bars_per_request
+                position,
+                bars_to_fetch
             )
 
-        if rates is None or len(rates) == 0:
-            error = mt5.last_error()
-            logger.warning(f"copy_rates_from_pos failed: {error}")
+            if rates is None or len(rates) == 0:
+                error = mt5.last_error()
+                if position == 0:
+                    # First chunk failed, try smaller size
+                    logger.warning(f"Chunk fetch failed: {error}, trying smaller size...")
+                    for smaller_size in [20000, 10000, 5000, 1000]:
+                        rates = mt5.copy_rates_from_pos(
+                            self.symbol,
+                            self.mt5_timeframe,
+                            0,
+                            smaller_size
+                        )
+                        if rates is not None and len(rates) > 0:
+                            logger.info(f"Successfully fetched {len(rates)} bars with size {smaller_size}")
+                            all_rates.append(rates)
+                            break
+                    break
+                else:
+                    # Subsequent chunk failed, we have some data already
+                    logger.info(f"No more data available at position {position}")
+                    break
 
-            # Fallback: try copy_rates_range with shorter period
-            logger.info("Trying fallback with copy_rates_range...")
-            rates = mt5.copy_rates_range(
-                self.symbol,
-                self.mt5_timeframe,
-                start_date_clean,
-                end_date_clean
-            )
+            all_rates.append(rates)
+            logger.info(f"Fetched {len(rates)} bars in this chunk")
 
-        if rates is None or len(rates) == 0:
-            error = mt5.last_error()
-            logger.warning(f"No data returned from MT5: {error}")
+            # If we got less than requested, we've reached the end
+            if len(rates) < bars_to_fetch - 100:
+                logger.info("Reached end of available data")
+                break
 
-            # Try one more fallback - fetch just recent data
-            logger.info("Trying to fetch just recent 10000 bars...")
-            rates = mt5.copy_rates_from_pos(
-                self.symbol,
-                self.mt5_timeframe,
-                0,
-                10000
-            )
+            position += len(rates)
 
-        if rates is None or len(rates) == 0:
-            error = mt5.last_error()
-            logger.error(f"All fetch attempts failed: {error}")
+        if not all_rates:
+            logger.error("No data fetched from MT5")
             return pd.DataFrame()
+
+        # Combine all chunks
+        rates = np.concatenate(all_rates)
 
         # Convert to DataFrame
         df = pd.DataFrame(rates)
