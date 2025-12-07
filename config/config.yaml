@@ -1,0 +1,253 @@
+# =============================================================================
+# AI Trading Bot XAUUSD - Configuration File
+# =============================================================================
+# IMPORTANT: Do NOT commit real credentials to version control!
+# For production, use environment variables or a separate secrets file.
+
+# -----------------------------------------------------------------------------
+# MetaTrader 5 Broker Connection
+# -----------------------------------------------------------------------------
+broker:
+  # MT5 Terminal path (adjust for your Windows installation)
+  terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+
+  # Login credentials (use environment variables in production)
+  # Set via: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
+  login: ${MT5_LOGIN}
+  password: ${MT5_PASSWORD}
+  server: ${MT5_SERVER}
+
+  # Connection settings
+  timeout_ms: 10000
+  retry_attempts: 3
+  retry_delay_seconds: 5
+
+# -----------------------------------------------------------------------------
+# Trading Symbol & Timeframe
+# -----------------------------------------------------------------------------
+trading:
+  symbol: "XAUUSD"
+  timeframe: "M15"  # Options: M1, M5, M15, M30, H1, H4, D1
+
+  # Trading sessions (UTC hours) - when bot is allowed to trade
+  allowed_sessions:
+    london_open: [7, 16]      # 07:00 - 16:00 UTC
+    new_york_open: [12, 21]   # 12:00 - 21:00 UTC
+
+  # Hours to avoid trading (UTC) - low liquidity / high spread
+  blocked_hours_utc: [22, 23, 0, 1, 2, 3, 4]
+
+  # Magic number for identifying bot's orders
+  magic_number: 123456
+
+# -----------------------------------------------------------------------------
+# Risk Management Parameters
+# -----------------------------------------------------------------------------
+risk:
+  # Per-trade risk
+  risk_per_trade_percent: 2.0      # 2% of balance per trade
+
+  # Position limits
+  max_open_trades: 2               # Maximum simultaneous positions
+  max_lot_size: 1.0                # Maximum lot size regardless of calculation
+  min_lot_size: 0.01               # Minimum lot size
+
+  # Daily/Weekly limits (circuit breakers)
+  max_daily_loss_percent: 3.0      # Stop trading if daily loss exceeds this
+  max_weekly_loss_percent: 7.0     # Stop trading if weekly loss exceeds this
+  max_drawdown_percent: 15.0       # Emergency stop if DD exceeds this
+
+  # Consecutive loss handling
+  max_consecutive_losses: 5        # Pause trading after N consecutive losses
+  cooldown_after_losses_minutes: 60
+
+  # Stop Loss / Take Profit settings
+  sl_atr_multiplier: 2.0           # SL = ATR * this value
+  tp_atr_multiplier: 3.0           # TP = ATR * this value (1.5:1 R:R minimum)
+  max_sl_pips: 500                 # Maximum SL in pips (safety cap)
+  min_sl_pips: 50                  # Minimum SL in pips
+
+# -----------------------------------------------------------------------------
+# Model & Feature Configuration
+# -----------------------------------------------------------------------------
+model:
+  # Model type
+  type: "lightgbm"  # Options: lightgbm, xgboost
+
+  # Prediction settings
+  prediction_horizon_bars: 4       # Predict return 4 bars ahead (1 hour for M15)
+
+  # Classification thresholds
+  # Label: 1 if return > threshold, -1 if return < -threshold, 0 otherwise
+  return_threshold_percent: 0.1    # 0.1% move required to classify as up/down
+
+  # Probability threshold for trading signals
+  min_probability_threshold: 0.55  # Only trade if model confidence > 55%
+
+  # LightGBM hyperparameters
+  lgbm_params:
+    objective: "multiclass"
+    num_class: 3                   # -1 (down), 0 (neutral), 1 (up)
+    num_leaves: 31
+    max_depth: 6
+    learning_rate: 0.05
+    n_estimators: 500
+    min_child_samples: 50
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    random_state: 42
+    n_jobs: -1
+    verbose: -1
+
+# -----------------------------------------------------------------------------
+# Feature Engineering
+# -----------------------------------------------------------------------------
+features:
+  # Lookback window for feature calculation
+  lookback_window: 100             # Bars to consider for rolling calculations
+
+  # Price-based features
+  price_features:
+    - returns                      # Simple returns
+    - log_returns                  # Log returns
+    - price_range                  # High - Low
+    - body_size                    # |Close - Open|
+    - upper_shadow                 # High - max(Open, Close)
+    - lower_shadow                 # min(Open, Close) - Low
+
+  # Technical indicators
+  technical_indicators:
+    ema_periods: [8, 21, 50, 100, 200]
+    rsi_period: 14
+    atr_period: 14
+    bollinger_period: 20
+    bollinger_std: 2.0
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    stochastic_k: 14
+    stochastic_d: 3
+
+  # Time-based features
+  time_features:
+    - hour_of_day                  # 0-23
+    - day_of_week                  # 0-6 (Monday=0)
+    - is_london_session            # Binary
+    - is_new_york_session          # Binary
+    - is_overlap_session           # London + NY overlap
+
+  # Volatility features
+  volatility_features:
+    rolling_std_periods: [5, 10, 20, 50]
+    atr_ratio_periods: [5, 20]     # Short-term ATR / Long-term ATR
+
+# -----------------------------------------------------------------------------
+# Training Configuration
+# -----------------------------------------------------------------------------
+training:
+  # Data window
+  training_window_days: 1825       # 5 years of historical data
+  validation_split: 0.2            # 20% for validation (time-ordered)
+
+  # Cross-validation
+  cv_splits: 5                     # Number of time-series CV splits
+  gap_bars: 4                      # Gap between train and test to avoid leakage
+
+  # Early stopping
+  early_stopping_rounds: 50
+
+  # Retraining schedule
+  retrain_frequency_days: 7        # Retrain every week
+  retrain_hour_utc: 1              # Retrain at 01:00 UTC (low activity)
+
+# -----------------------------------------------------------------------------
+# Retraining / Model Selection Criteria
+# -----------------------------------------------------------------------------
+retraining:
+  # Minimum improvement required to deploy new model
+  min_sharpe_ratio: 0.5            # New model must have Sharpe > 0.5
+  max_allowed_drawdown: 0.20       # Max 20% drawdown on validation
+  min_win_rate: 0.45               # At least 45% win rate
+  min_profit_factor: 1.1           # At least 1.1 profit factor
+
+  # Comparison thresholds (new vs current model)
+  sharpe_tolerance: 0.9            # New Sharpe >= Current * 0.9
+  drawdown_tolerance: 1.1          # New DD <= Current * 1.1
+  win_rate_tolerance: 0.05         # New WR >= Current - 5%
+
+  # Fallback settings
+  fallback_trigger_dd_percent: 15  # Revert to previous model if live DD > 15%
+  fallback_lookback_days: 7        # Check DD over last 7 days
+
+# -----------------------------------------------------------------------------
+# Backtesting Configuration
+# -----------------------------------------------------------------------------
+backtesting:
+  # Initial capital for simulation
+  initial_balance: 10000.0         # USD
+
+  # Trading costs
+  spread_pips: 3.0                 # Average spread for XAUUSD
+  commission_per_lot: 7.0          # Commission per lot (round trip)
+  slippage_pips: 1.0               # Expected slippage
+
+  # Output settings
+  save_trade_log: true
+  save_equity_curve: true
+  generate_report: true
+
+# -----------------------------------------------------------------------------
+# Data Storage
+# -----------------------------------------------------------------------------
+storage:
+  # Data format
+  format: "parquet"                # Options: parquet, csv
+
+  # Paths (relative to project root)
+  data_cache_dir: "data_cache"
+  saved_models_dir: "saved_models"
+  logs_dir: "logs"
+  reports_dir: "reports"
+
+  # Data file naming
+  historical_data_file: "xauusd_m15_historical.parquet"
+
+  # SQLite for trade logs (optional)
+  use_sqlite: true
+  sqlite_db: "trading_bot.db"
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"                    # DEBUG, INFO, WARNING, ERROR
+
+  # Log files
+  main_log: "trading_bot.log"
+  trade_log: "trades.log"
+  decision_log: "decisions.log"
+
+  # Log rotation
+  max_bytes: 10485760              # 10 MB
+  backup_count: 5
+
+  # Console output
+  console_output: true
+
+# -----------------------------------------------------------------------------
+# Monitoring & Alerts (Future Extension)
+# -----------------------------------------------------------------------------
+monitoring:
+  # Performance tracking
+  track_daily_pnl: true
+  track_trade_history: true
+
+  # Alert thresholds
+  alert_on_daily_loss_percent: 2.0
+  alert_on_consecutive_losses: 3
+
+  # Report generation
+  daily_report: true
+  weekly_report: true
