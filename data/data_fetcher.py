@@ -192,17 +192,67 @@ class DataFetcher:
             if not self.connect():
                 raise ConnectionError("Failed to connect to MT5")
 
-        # Fetch data from MT5 using cleaned datetime
-        rates = mt5.copy_rates_range(
-            self.symbol,
-            self.mt5_timeframe,
-            start_date_clean,
-            end_date_clean
-        )
+        # Calculate approximate number of bars needed
+        # M15 = 96 bars/day, account for weekends (5/7 trading days)
+        tf_minutes = get_timeframe_minutes(self.timeframe)
+        bars_per_day = (24 * 60) // tf_minutes
+        total_days = (end_date_clean - start_date_clean).days
+        trading_days = int(total_days * 5 / 7)  # Approximate trading days
+        estimated_bars = trading_days * bars_per_day
+
+        # MT5 has limits, fetch in chunks if needed
+        max_bars_per_request = 100000
+
+        logger.info(f"Estimated bars needed: {estimated_bars}")
+
+        # Try copy_rates_from_pos first (more reliable)
+        # This fetches N bars back from current time
+        if estimated_bars <= max_bars_per_request:
+            rates = mt5.copy_rates_from_pos(
+                self.symbol,
+                self.mt5_timeframe,
+                0,  # Start from current bar
+                min(estimated_bars + 1000, max_bars_per_request)  # Add buffer
+            )
+        else:
+            # For very large requests, use copy_rates_range in chunks
+            logger.info(f"Large request, fetching {estimated_bars} bars...")
+            rates = mt5.copy_rates_from_pos(
+                self.symbol,
+                self.mt5_timeframe,
+                0,
+                max_bars_per_request
+            )
+
+        if rates is None or len(rates) == 0:
+            error = mt5.last_error()
+            logger.warning(f"copy_rates_from_pos failed: {error}")
+
+            # Fallback: try copy_rates_range with shorter period
+            logger.info("Trying fallback with copy_rates_range...")
+            rates = mt5.copy_rates_range(
+                self.symbol,
+                self.mt5_timeframe,
+                start_date_clean,
+                end_date_clean
+            )
 
         if rates is None or len(rates) == 0:
             error = mt5.last_error()
             logger.warning(f"No data returned from MT5: {error}")
+
+            # Try one more fallback - fetch just recent data
+            logger.info("Trying to fetch just recent 10000 bars...")
+            rates = mt5.copy_rates_from_pos(
+                self.symbol,
+                self.mt5_timeframe,
+                0,
+                10000
+            )
+
+        if rates is None or len(rates) == 0:
+            error = mt5.last_error()
+            logger.error(f"All fetch attempts failed: {error}")
             return pd.DataFrame()
 
         # Convert to DataFrame
